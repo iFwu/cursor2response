@@ -100,7 +100,7 @@ is still cancelled; late cleanup must not remove a newer generation's state.
 SDK context-overflow errors wait for bounded cancellation and disposal before
 internal HTTP/NDJSON delivery. `contextRetrySafe` is true only for a captured
 attached Run whose cancellation and disposal succeeded. Local terminal flags
-are not that proof. See [Grok hybrid routing](grok-hybrid.md).
+are not that proof. See [API fallback routing](api-fallback.md).
 
 ## Pending Lease
 

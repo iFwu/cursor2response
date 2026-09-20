@@ -61,14 +61,11 @@ import {
 } from "./failure-trace.ts";
 import { resolveSessionAffinity, type SessionAffinityResolution } from "./session-affinity.ts";
 import {
-  GROK_HYBRID_FAST_MODEL,
-  GROK_HYBRID_MODEL,
-  GROK_HYBRID_PRIMARY_MODEL,
-  GrokHybridRoute,
-  hybridConfig,
-  isGrokHybridFastModel,
-  isGrokHybridModel
-} from "./grok-hybrid.ts";
+  API_FALLBACK_MODEL,
+  ApiFallbackRoute,
+  apiFallbackConfig,
+  isApiFallbackModel
+} from "./api-fallback.ts";
 
 const HOST = process.env.HOST?.trim() || "127.0.0.1";
 const DEFAULT_PORT = 8787;
@@ -380,9 +377,8 @@ async function handleModels(request: Request): Promise<Response> {
   const models = await liveCursorModels(apiKey);
   const data = openAiCatalogData(models);
   try {
-    if (hybridConfig()) {
-      data.push({ id: GROK_HYBRID_MODEL, object: "model", created: 0, owned_by: "cursor2response" });
-      data.push({ id: GROK_HYBRID_FAST_MODEL, object: "model", created: 0, owned_by: "cursor2response" });
+    if (apiFallbackConfig()) {
+      data.push({ id: API_FALLBACK_MODEL, object: "model", created: 0, owned_by: "cursor2response" });
     }
   } catch { /* An optional route cannot make the existing model catalog unavailable. */ }
   return json({ object: "list", data });
@@ -391,7 +387,7 @@ async function handleModels(request: Request): Promise<Response> {
 async function handleModel(request: Request, id: string): Promise<Response> {
   const apiKey = resolveApiKey(request);
   if (!apiKey) return unauthorized();
-  if (isGrokHybridModel(id) && hybridConfig()) {
+  if (isApiFallbackModel(id) && apiFallbackConfig()) {
     return json({ id, object: "model", created: 0, owned_by: "cursor2response" });
   }
   const models = openAiCatalogData(await liveCursorModels(apiKey));
@@ -431,15 +427,12 @@ async function handleResponses(request: Request): Promise<Response> {
 
   const body = await request.json();
   const requestedModel = typeof (body as { model?: unknown })?.model === "string" ? (body as { model: string }).model : PRIMARY_MODEL;
-  const hybrid = isGrokHybridModel(requestedModel);
-  const config = hybrid ? hybridConfig() : undefined;
-  if (hybrid && (!config || !hasSdkBridge())) {
-    throw new HttpError("grok-hybrid requires SDK Bridge and fallback configuration.", 503, "hybrid_not_configured");
+  const fallbackEnabled = isApiFallbackModel(requestedModel);
+  const config = fallbackEnabled ? apiFallbackConfig() : undefined;
+  if (fallbackEnabled && (!config || !hasSdkBridge())) {
+    throw new HttpError("api-fallback requires SDK Bridge and fallback configuration.", 503, "api_fallback_not_configured");
   }
-  const primaryModel = hybrid && isGrokHybridFastModel(requestedModel)
-    ? `${GROK_HYBRID_PRIMARY_MODEL}-fast`
-    : GROK_HYBRID_PRIMARY_MODEL;
-  const cursorModel = await cursorModelSelection(hybrid ? primaryModel : requestedModel, body, apiKey);
+  const cursorModel = await cursorModelSelection(config?.primaryModel ?? requestedModel, body, apiKey);
   const prepared = prepareResponsesRequest(body, cursorModel);
   const toolContinuation = responseToolContinuation(body);
   const followUpPrompt = prepareResponsesFollowUpPrompt(body, cursorModel, toolContinuation.followUpInput);
@@ -449,7 +442,7 @@ async function handleResponses(request: Request): Promise<Response> {
 
   const incrementalPrompt = followUpPrompt ?? responsesIncrementalPrompt(body, cursorModel);
   const session = sessionAffinity(request, body);
-  const hybridRoute = config ? new GrokHybridRoute(config, {
+  const fallbackRoute = config ? new ApiFallbackRoute(config, {
     body, apiKey, session, workingDirectory: prepared.toolContext?.workingDirectory,
     signal: request.signal, requestId: id,
     clientSource: inferClientSource(request.headers), clientPlatform: inferClientPlatform(request.headers),
@@ -459,7 +452,7 @@ async function handleResponses(request: Request): Promise<Response> {
         content: traceContentText(result.output), callId: result.callId }))
     ]
   }, logTrajectory) : undefined;
-  const directFallback = await hybridRoute?.initialResponse();
+  const directFallback = await fallbackRoute?.initialResponse();
   if (directFallback) return directFallback;
   const failureTrace = createFailureTraceCapture({
     requestBody: body,
@@ -492,7 +485,7 @@ async function handleResponses(request: Request): Promise<Response> {
     toolContinuation.supersedingTurnAborted,
     toolContinuation.supersededToolCallIds,
     failureTrace,
-    hybridRoute
+    fallbackRoute
   );
 }
 
@@ -772,7 +765,7 @@ async function handleSdkRoute(
   supersedingTurnAborted = false,
   supersededToolCallIds: string[] = [],
   failureTrace?: FailureTraceCapture,
-  hybridRoute?: GrokHybridRoute
+  fallbackRoute?: ApiFallbackRoute
 ): Promise<Response> {
   const clientSource = inferClientSource(request.headers);
   const clientPlatform = inferClientPlatform(request.headers);
@@ -987,7 +980,7 @@ async function handleSdkRoute(
       signal: request.signal,
       failureTrace,
       failureTraceContext,
-      hybridRoute,
+      fallbackRoute,
       trajectory: kind === "responses" ? {
         sessionKey: session.key,
         ingressRequestId: id,
@@ -1001,7 +994,7 @@ async function handleSdkRoute(
   try {
     output = await collectCursorSdkOutput(stream);
   } catch (error) {
-    const fallback = await hybridRoute?.recover(error, false);
+    const fallback = await fallbackRoute?.recover(error, false);
     if (fallback) return fallback;
     if (kind === "responses") {
       logTrajectory("trajectory_error", {
@@ -1148,7 +1141,7 @@ interface StreamInput {
   signal?: AbortSignal;
   failureTrace?: FailureTraceCapture;
   failureTraceContext?: FailureTraceJournalContext;
-  hybridRoute?: GrokHybridRoute;
+  fallbackRoute?: ApiFallbackRoute;
   trajectory?: {
     sessionKey: string;
     ingressRequestId: string;
@@ -1232,7 +1225,7 @@ function streamOpenAiEvents(
       });
     };
     try {
-      if (!input.hybridRoute) await startResponse();
+      if (!input.fallbackRoute) await startResponse();
 
       for await (const event of cursorEvents) {
         if (event.type === "text" && event.text) {
@@ -1341,16 +1334,16 @@ function streamOpenAiEvents(
     } catch (error) {
       let fallbackPublished = false;
       try {
-        const fallback = await input.hybridRoute?.recover(error, responseStarted);
+        const fallback = await input.fallbackRoute?.recover(error, responseStarted);
         if (fallback) {
           if (!fallback.ok) {
             const body = await fallback.json().catch(() => ({})) as { error?: { message?: string; code?: string } };
             throw new HttpError(body.error?.message || "Fallback request failed.", fallback.status,
-              body.error?.code || "hybrid_fallback_http_error");
+              body.error?.code || "api_fallback_http_error");
           }
           if (!fallback.headers.get("content-type")?.includes("text/event-stream") || !fallback.body) {
             await fallback.body?.cancel();
-            throw new HttpError("Fallback did not return a Responses event stream.", 502, "hybrid_fallback_invalid_stream");
+            throw new HttpError("Fallback did not return a Responses event stream.", 502, "api_fallback_invalid_stream");
           }
           const reader = fallback.body.getReader();
           try {

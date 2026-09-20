@@ -12,7 +12,7 @@
   "include": [
     "core/**/*.ts",
     "sidecar/**/*.ts",
-    "scripts/validate-grok-hybrid.ts",
+    "scripts/validate-api-fallback.ts",
     "scripts/validate-responses-phases.ts"
   ],
   "exclude": [

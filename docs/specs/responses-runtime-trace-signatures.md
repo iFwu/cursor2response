@@ -176,7 +176,7 @@ unknown; it never authorizes a time-based join.
 
 ### `trajectory_route_decision`
 
-The opt-in [Grok hybrid route](grok-hybrid.md) records `route`, `routeCause`,
+The opt-in [API fallback route](api-fallback.md) records `route`, `routeCause`,
 `logicalModel`, `upstreamModel`, `routeStickyHit`, `attemptIndex`,
 `outputPublished`, `contextRetrySafe`, `fallbackAttempted`, and
 `fallbackBlockedReason`. Observations never control routing. Fallback requests

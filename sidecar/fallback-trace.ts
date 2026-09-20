@@ -1,16 +1,16 @@
-export type HybridTrace = (event: string, fields: Record<string, unknown>) => void;
+export type FallbackTrace = (event: string, fields: Record<string, unknown>) => void;
 
 const MAX_FRAME_CHARS = 1024 * 1024;
 const MAX_CONTENT_CHARS = 128 * 1024;
 
-export function observeHybridResponse(
+export function observeFallbackResponse(
   response: Response,
-  record: HybridTrace,
+  record: FallbackTrace,
   inputs: Array<{ source: "user" | "tool_result"; content: string; callId?: string }>
 ): Response {
-  const trace: HybridTrace = (event, fields) => { try { record(event, fields); } catch { /* Observation only. */ } };
+  const trace: FallbackTrace = (event, fields) => { try { record(event, fields); } catch { /* Observation only. */ } };
   if (!response.ok) {
-    trace("trajectory_execution_terminal", { status: "failed", errorCode: "hybrid_fallback_http_error", upstreamStatus: response.status });
+    trace("trajectory_execution_terminal", { status: "failed", errorCode: "api_fallback_http_error", upstreamStatus: response.status });
   }
   if (!response.body) return response;
   let accepted = false;
@@ -64,7 +64,7 @@ export function observeHybridResponse(
     trace("trajectory_execution_terminal", {
       status: result.status === "completed" ? "finished" : result.status === "cancelled" ? "cancelled" : "failed",
       responseId: result.id,
-      errorCode: result.error?.code ?? (result.status === "incomplete" ? "hybrid_fallback_incomplete" : undefined),
+      errorCode: result.error?.code ?? (result.status === "incomplete" ? "api_fallback_incomplete" : undefined),
       inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
       cachedInputTokens: usage?.input_tokens_details?.cached_tokens
     });
@@ -91,7 +91,7 @@ export function observeHybridResponse(
     } catch {
       disabled = true;
       buffer = "";
-      trace("trajectory_observation_error", { scope: "hybrid_response", errorCode: "trace_upstream_parse_failed" });
+      trace("trajectory_observation_error", { scope: "fallback_response", errorCode: "trace_upstream_parse_failed" });
     }
   };
   const reader = response.body.getReader();
@@ -101,7 +101,7 @@ export function observeHybridResponse(
         const { value, done } = await reader.read();
         if (done) {
           observeBytes(undefined, true);
-          if (!terminal) trace("trajectory_error", { phase: "fallback_publication", errorCode: "hybrid_terminal_unobserved", terminal: false });
+          if (!terminal) trace("trajectory_error", { phase: "fallback_publication", errorCode: "fallback_terminal_unobserved", terminal: false });
           controller.close();
           reader.releaseLock();
         } else {
@@ -109,7 +109,7 @@ export function observeHybridResponse(
           observeBytes(value);
         }
       } catch (error) {
-        trace("trajectory_execution_terminal", { status: "failed", errorCode: "hybrid_fallback_stream_failed" });
+        trace("trajectory_execution_terminal", { status: "failed", errorCode: "api_fallback_stream_failed" });
         controller.error(error);
         reader.releaseLock();
       }

@@ -29,7 +29,7 @@
 <rect x="335" y="566" width="425" height="28" rx="0" fill="#FFFFFF"/>
 <text x="548" y="587" font-size="22" fill="#087F78" font-weight="500" text-anchor="middle">New input → native steer</text>
 <rect x="1040" y="278" width="472" height="396" rx="24" fill="#F3E8DD"/>
-<text x="1072" y="320" font-size="19" fill="#BE592B" font-weight="600">02  OPTIONAL GROK HYBRID</text>
+<text x="1072" y="320" font-size="19" fill="#BE592B" font-weight="600">02  OPTIONAL API FALLBACK</text>
 <text x="1072" y="367" font-size="28" fill="#142F3A" font-weight="600">SDK first</text>
 <path d="M 1082 392 V 431" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M 1075 421 L 1082 431 L 1089 421" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>

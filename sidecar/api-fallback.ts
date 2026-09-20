@@ -7,23 +7,18 @@ import { CursorSdkContextOverflowError } from "../core/cursor-sdk.ts";
 import { HttpError, withCors } from "../core/http.ts";
 import type { Deps } from "../core/types.ts";
 import type { SessionAffinityResolution } from "./session-affinity.ts";
-import { observeHybridResponse, type HybridTrace } from "./hybrid-trace.ts";
-import { guardHybridStream } from "./hybrid-stream.ts";
+import { observeFallbackResponse, type FallbackTrace } from "./fallback-trace.ts";
+import { guardFallbackStream } from "./fallback-stream.ts";
 
-export const GROK_HYBRID_MODEL = "grok-hybrid";
-export const GROK_HYBRID_FAST_MODEL = "grok-hybrid-fast";
-export const GROK_HYBRID_PRIMARY_MODEL = "grok-4.6";
+export const API_FALLBACK_MODEL = "cursor-auto";
 
-export function isGrokHybridModel(modelId: string): boolean {
+export function isApiFallbackModel(modelId: string): boolean {
   const normalized = modelId.trim().toLowerCase();
-  return normalized === GROK_HYBRID_MODEL || normalized === GROK_HYBRID_FAST_MODEL;
+  return normalized === API_FALLBACK_MODEL;
 }
 
-export function isGrokHybridFastModel(modelId: string): boolean {
-  return modelId.trim().toLowerCase() === GROK_HYBRID_FAST_MODEL;
-}
-
-export interface HybridConfig {
+export interface ApiFallbackConfig {
+  primaryModel: string;
   responsesUrl: string;
   apiKey: string;
   model: string;
@@ -32,57 +27,58 @@ export interface HybridConfig {
   notifyCommand?: string;
 }
 
-export function hybridConfig(environment = process.env): HybridConfig | undefined {
-  const baseUrl = environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL?.trim();
-  const apiKey = environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY?.trim();
-  const model = environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL?.trim();
-  if (!baseUrl && !apiKey && !model) return undefined;
-  if (!baseUrl || !apiKey || !model) {
-    throw new HttpError("grok-hybrid fallback configuration is incomplete.", 503, "hybrid_not_configured");
+export function apiFallbackConfig(environment = process.env): ApiFallbackConfig | undefined {
+  const primaryModel = environment.C2R_PRIMARY_MODEL?.trim();
+  const baseUrl = environment.C2R_FALLBACK_BASE_URL?.trim();
+  const apiKey = environment.C2R_FALLBACK_API_KEY?.trim();
+  const model = environment.C2R_FALLBACK_MODEL?.trim();
+  if (!primaryModel && !baseUrl && !apiKey && !model) return undefined;
+  if (!primaryModel || !baseUrl || !apiKey || !model) {
+    const missing = Object.entries({ C2R_PRIMARY_MODEL: primaryModel, C2R_FALLBACK_BASE_URL: baseUrl,
+      C2R_FALLBACK_API_KEY: apiKey, C2R_FALLBACK_MODEL: model }).filter(([, value]) => !value).map(([name]) => name);
+    throw new HttpError(`api-fallback configuration is incomplete: ${missing.join(", ")}.`, 503, "api_fallback_not_configured");
   }
   let url: URL;
   try { url = new URL(baseUrl); } catch {
-    throw new HttpError("Invalid grok-hybrid fallback base URL.", 503, "hybrid_not_configured");
+    throw new HttpError("Invalid api-fallback base URL.", 503, "api_fallback_not_configured");
   }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
-    || model === GROK_HYBRID_MODEL) {
-    throw new HttpError("Invalid grok-hybrid fallback configuration.", 503, "hybrid_not_configured");
+    || isApiFallbackModel(primaryModel.split("[")[0]) || isApiFallbackModel(model)) {
+    throw new HttpError("Invalid api-fallback configuration.", 503, "api_fallback_not_configured");
   }
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/responses`;
-  const timeoutMs = Number(environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_TIMEOUT_MS ?? 180000);
+  const timeoutMs = Number(environment.C2R_FALLBACK_TIMEOUT_MS?.trim() || 180000);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3600000) {
-    throw new HttpError("Invalid grok-hybrid fallback timeout.", 503, "hybrid_not_configured");
+    throw new HttpError("Invalid api-fallback timeout.", 503, "api_fallback_not_configured");
   }
   return {
+    primaryModel,
     responsesUrl: url.href,
     apiKey,
     model,
     timeoutMs,
-    stateDirectory: environment.CURSOR2RESPONSE_GROK_HYBRID_STATE_DIR?.trim()
-      || path.join(environment.XDG_STATE_HOME?.trim() || path.join(homedir(), ".local/state"), "cursor2response", "hybrid-routes"),
-    notifyCommand: environment.CURSOR2RESPONSE_GROK_HYBRID_NOTIFY === "0"
-      ? undefined
-      : environment.CURSOR2RESPONSE_GROK_HYBRID_NOTIFY_SEND?.trim()
-        || path.join(homedir(), ".local/bin/notify-send")
+    stateDirectory: environment.C2R_FALLBACK_STATE_DIR?.trim()
+      || path.join(environment.XDG_STATE_HOME?.trim() || path.join(homedir(), ".local/state"), "cursor2response", "fallback-routes"),
+    notifyCommand: environment.C2R_FALLBACK_NOTIFY_COMMAND?.trim() || undefined
   };
 }
 
-export class HybridRouteStore {
+export class FallbackRouteStore {
   constructor(private readonly directory: string) {}
 
   private filename(key: string): string {
-    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("Invalid hybrid route identity");
+    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("Invalid fallback route identity");
     return path.join(this.directory, `${key}.json`);
   }
 
   async hasFallback(key: string): Promise<boolean> {
     try {
       const state = JSON.parse(await readFile(this.filename(key), "utf8"));
-      if (state.version !== 1 || state.route !== "fallback") throw new Error("Invalid hybrid route state");
+      if (state.version !== 1 || state.route !== "fallback") throw new Error("Invalid fallback route state");
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw new HttpError("Unable to read grok-hybrid route state.", 503, "hybrid_route_state_unavailable");
+      throw new HttpError("Unable to read api-fallback route state.", 503, "api_fallback_route_state_unavailable");
     }
   }
 
@@ -98,12 +94,12 @@ export class HybridRouteStore {
       });
       await rename(temporary, filename);
     } catch {
-      throw new HttpError("Unable to persist grok-hybrid route state.", 503, "hybrid_route_state_unavailable");
+      throw new HttpError("Unable to persist api-fallback route state.", 503, "api_fallback_route_state_unavailable");
     }
   }
 }
 
-export interface HybridRequest {
+export interface ApiFallbackRequest {
   body: Record<string, unknown>;
   apiKey: string;
   session: SessionAffinityResolution;
@@ -115,7 +111,9 @@ export interface HybridRequest {
   inputs: Array<{ source: "user" | "tool_result"; content: string; callId?: string }>;
 }
 
-export interface HybridFallbackNotice {
+export interface FallbackNotice {
+  primaryModel: string;
+  fallbackModel: string;
   sessionKey: string;
   thisTurn: "recovered" | "marked-only";
   userSnippet?: string;
@@ -153,9 +151,9 @@ function visibleUserSnippet(content: string, maxChars: number): string | undefin
   return chars.length > maxChars ? `${chars.slice(0, maxChars).join("")}...` : text;
 }
 
-export function hybridFallbackNotifyArgs(notice: HybridFallbackNotice): string[] {
+export function fallbackNotifyArgs(notice: FallbackNotice): string[] {
   const args = [
-    "--title", notice.thisTurn === "marked-only" ? "grok-hybrid → MP（仅后续）" : "grok-hybrid → MP",
+    "--title", `${notice.primaryModel} → ${notice.fallbackModel}${notice.thisTurn === "marked-only" ? "（仅后续）" : ""}`,
     "--level", "warn",
     "--source", "cursor2response",
     "--field", `session=${notice.sessionKey}`
@@ -165,38 +163,40 @@ export function hybridFallbackNotifyArgs(notice: HybridFallbackNotice): string[]
   return args;
 }
 
-export function notifyHybridFallback(command: string | undefined, notice: HybridFallbackNotice): void {
+export function notifyApiFallback(command: string | undefined, notice: FallbackNotice): void {
   if (!command) return;
   try {
-    const child = spawn(command, hybridFallbackNotifyArgs(notice), { detached: true, stdio: "ignore" });
+    const child = spawn(command, fallbackNotifyArgs(notice), { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
     child.unref();
   } catch { /* Notification never changes routing. */ }
 }
 
-export class GrokHybridRoute {
+export class ApiFallbackRoute {
   private readonly key: string;
-  private readonly store: HybridRouteStore;
+  private readonly store: FallbackRouteStore;
   private attemptIndex = 0;
 
   constructor(
-    private readonly config: HybridConfig,
-    private readonly request: HybridRequest,
-    private readonly trace: HybridTrace,
+    private readonly config: ApiFallbackConfig,
+    private readonly request: ApiFallbackRequest,
+    private readonly trace: FallbackTrace,
     private readonly fetchUpstream: Deps["fetch"] = fetch
   ) {
     if (request.session.source === "generated") {
-      throw new HttpError("grok-hybrid requires a session header or prompt_cache_key.", 400, "hybrid_session_required");
+      throw new HttpError("api-fallback requires a session header or prompt_cache_key.", 400, "api_fallback_session_required");
     }
     if (request.body.previous_response_id) {
-      throw new HttpError("grok-hybrid requires complete input history, not previous_response_id.", 400, "unsupported_parameter", "previous_response_id");
+      throw new HttpError("api-fallback requires complete input history, not previous_response_id.", 400, "unsupported_parameter", "previous_response_id");
     }
     if (typeof request.body.system_prompt === "string") {
-      throw new HttpError("grok-hybrid does not support the SDK-only system_prompt override.", 400, "unsupported_parameter", "system_prompt");
+      throw new HttpError("api-fallback does not support the SDK-only system_prompt override.", 400, "unsupported_parameter", "system_prompt");
     }
     this.key = createHash("sha256")
-      .update(JSON.stringify([request.apiKey, GROK_HYBRID_MODEL, request.workingDirectory ?? "", request.session.key]))
+      .update(JSON.stringify([request.apiKey, API_FALLBACK_MODEL, config.primaryModel,
+        config.responsesUrl, config.model, request.workingDirectory ?? "", request.session.key]))
       .digest("hex");
-    this.store = new HybridRouteStore(config.stateDirectory);
+    this.store = new FallbackRouteStore(config.stateDirectory);
   }
 
   private record(fields: Record<string, unknown>): void {
@@ -206,7 +206,8 @@ export class GrokHybridRoute {
         requestId: this.request.requestId,
         ingressRequestId: this.request.requestId,
         logicalRequestId: this.request.requestId,
-        logicalModel: GROK_HYBRID_MODEL,
+        logicalModel: API_FALLBACK_MODEL,
+        primaryModel: this.config.primaryModel,
         clientSource: this.request.clientSource,
         clientPlatform: this.request.clientPlatform,
         ...fields
@@ -232,7 +233,9 @@ export class GrokHybridRoute {
         : this.request.signal.aborted ? "caller_cancelled" : "cleanup_unconfirmed",
       routeStickyHit: false
     });
-    notifyHybridFallback(this.config.notifyCommand, {
+    notifyApiFallback(this.config.notifyCommand, {
+      primaryModel: this.config.primaryModel,
+      fallbackModel: this.config.model,
       sessionKey: this.request.session.key,
       thisTurn: retrySafe ? "recovered" : "marked-only",
       userSnippet: lastUserSnippet(this.request.body.input),
@@ -246,7 +249,7 @@ export class GrokHybridRoute {
   private async forward(routeCause: string, stickyHit: boolean): Promise<Response> {
     this.request.signal.throwIfAborted();
     const requestId = `fallback_${randomUUID()}`;
-    const trace: HybridTrace = (event, fields) => {
+    const trace: FallbackTrace = (event, fields) => {
       try {
         this.trace(event, {
           sessionKey: this.request.session.key,
@@ -257,7 +260,7 @@ export class GrokHybridRoute {
           agentId: `fallback_${this.key}`,
           clientSource: this.request.clientSource,
           clientPlatform: this.request.clientPlatform,
-          route: "fallback", logicalModel: GROK_HYBRID_MODEL, upstreamModel: this.config.model,
+          route: "fallback", logicalModel: API_FALLBACK_MODEL, upstreamModel: this.config.model,
           model: { id: this.config.model },
           ...fields
         });
@@ -276,7 +279,7 @@ export class GrokHybridRoute {
           "content-type": "application/json",
           accept: this.request.body.stream === true ? "text/event-stream" : "application/json",
           authorization: `Bearer ${this.config.apiKey}`,
-          session_id: `hybrid-${this.key}`
+          session_id: `fallback-${this.key}`
         },
         body: JSON.stringify({ ...this.request.body, model: this.config.model }),
         signal: AbortSignal.any([this.request.signal, AbortSignal.timeout(this.config.timeoutMs ?? 180000)]),
@@ -284,10 +287,10 @@ export class GrokHybridRoute {
       });
     } catch (error) {
       trace("trajectory_execution_terminal", { status: this.request.signal.aborted ? "cancelled" : "failed",
-        errorCode: this.request.signal.aborted ? "cursor_sdk_cancelled" : "hybrid_fallback_transport_failed" });
+        errorCode: this.request.signal.aborted ? "cursor_sdk_cancelled" : "api_fallback_transport_failed" });
       if (this.request.signal.aborted) throw error;
-      throw new HttpError("grok-hybrid fallback request failed.", 502, "hybrid_fallback_transport_failed");
+      throw new HttpError("api-fallback request failed.", 502, "api_fallback_transport_failed");
     }
-    return withCors(observeHybridResponse(guardHybridStream(response), trace, this.request.inputs));
+    return withCors(observeFallbackResponse(guardFallbackStream(response), trace, this.request.inputs));
   }
 }

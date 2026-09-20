@@ -5,7 +5,7 @@ RUN npm ci --no-audit --no-fund
 COPY tsconfig.runtime.json tsconfig.json ./
 COPY sidecar ./sidecar
 COPY core ./core
-COPY scripts/validate-grok-hybrid.ts scripts/validate-responses-phases.ts ./scripts/
+COPY scripts/validate-api-fallback.ts scripts/validate-responses-phases.ts ./scripts/
 COPY tools/trace-viewer ./tools/trace-viewer
 RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 

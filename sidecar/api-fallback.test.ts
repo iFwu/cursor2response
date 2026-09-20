@@ -5,26 +5,26 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { CursorSdkContextOverflowError } from "../core/cursor-sdk.ts";
 import { HttpError } from "../core/http.ts";
-import { GROK_HYBRID_FAST_MODEL, GROK_HYBRID_MODEL, GrokHybridRoute, hybridConfig, hybridFallbackNotifyArgs, isGrokHybridFastModel, isGrokHybridModel, lastUserSnippet, type HybridConfig, type HybridRequest } from "./grok-hybrid.ts";
-import { observeHybridResponse } from "./hybrid-trace.ts";
+import { API_FALLBACK_MODEL, ApiFallbackRoute, apiFallbackConfig, fallbackNotifyArgs, isApiFallbackModel, lastUserSnippet, type ApiFallbackConfig, type ApiFallbackRequest } from "./api-fallback.ts";
+import { observeFallbackResponse } from "./fallback-trace.ts";
 
 async function fixture(run: (input: {
-  config: HybridConfig; request: HybridRequest; calls: RequestInit[];
+  config: ApiFallbackConfig; request: ApiFallbackRequest; calls: RequestInit[];
   events: Array<{ event: string; fields: Record<string, unknown> }>;
-  route: (changes?: Partial<HybridRequest>) => GrokHybridRoute;
+  route: (changes?: Partial<ApiFallbackRequest>) => ApiFallbackRoute;
 }) => Promise<void>) {
-  const directory = await mkdtemp(path.join(tmpdir(), "grok-hybrid-test-"));
-  const config: HybridConfig = { responsesUrl: "https://fallback.example/v1/responses",
+  const directory = await mkdtemp(path.join(tmpdir(), "api-fallback-test-"));
+  const config: ApiFallbackConfig = { primaryModel: "cursor-primary", responsesUrl: "https://fallback.example/v1/responses",
     apiKey: "fallback-secret", model: "mp-grok", stateDirectory: directory };
-  const request: HybridRequest = {
-    apiKey: "cursor-secret", body: { model: "grok-hybrid", input: "hello", stream: false },
+  const request: ApiFallbackRequest = {
+    apiKey: "cursor-secret", body: { model: "cursor-auto", input: "hello", stream: false },
     session: { key: "session-one", source: "header:session-id", sessionHeaders: ["session-id"] },
     workingDirectory: "/project", requestId: "resp-one", signal: new AbortController().signal,
     clientSource: "openclaw", clientPlatform: "linux", inputs: [{ source: "user", content: "hello" }]
   };
   const calls: RequestInit[] = [];
   const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
-  const route = (changes: Partial<HybridRequest> = {}) => new GrokHybridRoute(config, { ...request, ...changes },
+  const route = (changes: Partial<ApiFallbackRequest> = {}) => new ApiFallbackRoute(config, { ...request, ...changes },
     (event, fields) => { events.push({ event, fields }); },
     (async (_url, init) => {
       calls.push(init!);
@@ -35,22 +35,36 @@ async function fixture(run: (input: {
   }
 }
 
-test("recognizes the default and explicit fast model variants", () => {
-  expect(isGrokHybridModel(GROK_HYBRID_MODEL)).toBe(true);
-  expect(isGrokHybridModel(GROK_HYBRID_FAST_MODEL)).toBe(true);
-  expect(isGrokHybridFastModel(GROK_HYBRID_FAST_MODEL)).toBe(true);
-  expect(isGrokHybridFastModel(GROK_HYBRID_MODEL)).toBe(false);
-  expect(isGrokHybridModel("grok-hybrid-other")).toBe(false);
+test("recognizes only the cursor-auto logical model", () => {
+  expect(isApiFallbackModel(API_FALLBACK_MODEL)).toBe(true);
+  expect(isApiFallbackModel(" CURSOR-AUTO ")).toBe(true);
+  for (const model of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-auto-fast", "grok-4.6"]) {
+    expect(isApiFallbackModel(model)).toBe(false);
+  }
+  expect(isApiFallbackModel("api-fallback-other")).toBe(false);
 });
 
 test("requires an explicit complete fallback configuration and rejects recursive model configuration", () => {
-  expect(hybridConfig({})).toBeUndefined();
-  expect(() => hybridConfig({ CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL: "mp-grok" })).toThrow("incomplete");
-  const env = { CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL: "https://fallback.example/v1/",
-    CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY: "key", CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL: "mp-grok" };
-  expect(hybridConfig(env)?.responsesUrl).toBe("https://fallback.example/v1/responses");
-  expect(() => hybridConfig({ ...env, CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL: "grok-hybrid" })).toThrow();
-  expect(() => hybridConfig({ ...env, CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL: "file:///tmp" })).toThrow();
+  expect(apiFallbackConfig({})).toBeUndefined();
+  expect(() => apiFallbackConfig({ C2R_FALLBACK_MODEL: "mp-grok" })).toThrow("incomplete");
+  const env = { C2R_PRIMARY_MODEL: "cursor-primary", C2R_FALLBACK_BASE_URL: "https://fallback.example/v1/",
+    C2R_FALLBACK_API_KEY: "key", C2R_FALLBACK_MODEL: "mp-grok" };
+  expect(apiFallbackConfig(env)?.responsesUrl).toBe("https://fallback.example/v1/responses");
+  expect(apiFallbackConfig(env)?.primaryModel).toBe("cursor-primary");
+  expect(apiFallbackConfig(env)?.notifyCommand).toBeUndefined();
+  expect(apiFallbackConfig({ ...env, C2R_FALLBACK_NOTIFY_COMMAND: "/example/notify" })?.notifyCommand).toBe("/example/notify");
+  for (const name of Object.keys(env)) {
+    expect(() => apiFallbackConfig({ ...env, [name]: " " })).toThrow(name);
+  }
+  expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: " CURSOR-AUTO " })).toThrow();
+  expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: "cursor-auto[fast=true]" })).toThrow();
+  expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_MODEL: " CURSOR-AUTO " })).toThrow();
+  expect(apiFallbackConfig({ ...env, C2R_FALLBACK_TIMEOUT_MS: "" })?.timeoutMs).toBe(180000);
+  for (const timeout of ["0", "-1", "1.5", "invalid", "3600001"]) {
+    expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_TIMEOUT_MS: timeout })).toThrow("timeout");
+  }
+  expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_MODEL: "cursor-auto" })).toThrow();
+  expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_BASE_URL: "file:///tmp" })).toThrow();
 });
 
 test("persists overflow routing across instances without forwarding Cursor credentials or losing tool history", async () => {
@@ -74,6 +88,33 @@ test("persists overflow routing across instances without forwarding Cursor crede
     expect(await route({ apiKey: "other-key" }).initialResponse()).toBeUndefined();
     expect(await route({ workingDirectory: "/other" }).initialResponse()).toBeUndefined();
     expect(await route({ session: { ...request.session, key: "new-session" } }).initialResponse()).toBeUndefined();
+  });
+});
+
+test("isolates sticky routes by configured primary and fallback target, but permits key rotation", async () => {
+  await fixture(async ({ route, config, request }) => {
+    await (await route().recover(new CursorSdkContextOverflowError("SDK compacted", true), false))!.text();
+    for (const change of [{ primaryModel: "another-primary" }, { model: "another-fallback" },
+      { responsesUrl: "https://other.example/v1/responses" }]) {
+      const next = new ApiFallbackRoute({ ...config, ...change }, request, () => {});
+      expect(await next.initialResponse()).toBeUndefined();
+    }
+    let key: string | null = null;
+    const rotated = new ApiFallbackRoute({ ...config, apiKey: "rotated-key" }, request, () => {}, async (_url, init) => {
+      key = new Headers(init?.headers).get("authorization");
+      return Response.json({ status: "completed", output: [] });
+    });
+    await (await rotated.initialResponse())!.text();
+    expect(key).toBe("Bearer rotated-key");
+  });
+});
+
+test("a missing notification executable cannot fail recovery", async () => {
+  await fixture(async ({ config, request }) => {
+    const route = new ApiFallbackRoute({ ...config, notifyCommand: path.join(config.stateDirectory, "missing-command") },
+      request, () => {}, async () => Response.json({ status: "completed", output: [] }));
+    expect((await route.recover(new CursorSdkContextOverflowError("SDK compacted", true), false))?.ok).toBe(true);
+    await delay(30);
   });
 });
 
@@ -140,7 +181,7 @@ test("records MP output and usage while forwarding SSE bytes unchanged, includin
   ];
   const bytes = events.map((event) => `data: ${JSON.stringify(event)}\r\n\r\n`).join("");
   const observed: Array<{ event: string; fields: Record<string, unknown> }> = [];
-  const response = observeHybridResponse(new Response(bytes, { headers: { "content-type": "text/event-stream" } }),
+  const response = observeFallbackResponse(new Response(bytes, { headers: { "content-type": "text/event-stream" } }),
     (event, fields) => { observed.push({ event, fields }); }, [{ source: "user", content: "hello" }]);
   expect(await response.text()).toBe(bytes);
   expect(observed.filter((entry) => entry.event === "trajectory_output_content_chunk")).toHaveLength(1);
@@ -151,7 +192,7 @@ test("records MP output and usage while forwarding SSE bytes unchanged, includin
 
 test("malformed or oversized observations and trace writer failure do not alter upstream bytes", async () => {
   for (const text of ["data: invalid-json\n\n", `data: ${"x".repeat(1024 * 1024 + 1)}`]) {
-    const response = observeHybridResponse(new Response(text, { headers: { "content-type": "text/event-stream" } }),
+    const response = observeFallbackResponse(new Response(text, { headers: { "content-type": "text/event-stream" } }),
       () => { throw new Error("logging unavailable"); }, []);
     expect(await response.text()).toBe(text);
   }
@@ -170,7 +211,7 @@ test("client cancellation reaches the fallback without a second upstream attempt
 test("fallback HTTP failure preserves its status and the sticky route without retrying", async () => {
   await fixture(async ({ config, request }) => {
     let calls = 0;
-    const create = () => new GrokHybridRoute(config, request, () => { throw new Error("trace failure"); },
+    const create = () => new ApiFallbackRoute(config, request, () => { throw new Error("trace failure"); },
       (async () => { calls++; return Response.json({ error: { code: "rate_limit" } }, { status: 429 }); }));
     const first = await create().recover(new CursorSdkContextOverflowError("SDK compacted", true), false);
     expect(first?.status).toBe(429);
@@ -188,13 +229,14 @@ test("formats a short notify payload around the last user snippet", () => {
     { role: "user", content: "[Tue 2026-09-08 22:21 GMT+8] Conversation info: ⟦openclaw:ctx⟧\n```json\n{\"sender\":{\"id\":\"8125678955\"}}\n```\n\n你好，我现在用了grok hybird，默认模型仍是cursor grok吗？" },
     { role: "user", content: "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nConversation info" }
   ])).toBe("你好，我现在用了grok hybird，默认模型仍是cursor grok吗？");
-  expect(hybridFallbackNotifyArgs({
+  expect(fallbackNotifyArgs({
+    primaryModel: "cursor-primary", fallbackModel: "api-model",
     sessionKey: "e098afb2-857e-44fd-aec2-7f444083f956:5",
     thisTurn: "recovered",
     userSnippet: "你好，我现在用了grok hybird，默认模型仍是cursor grok吗？",
     requestId: "resp_1313eeed0d87477cb14ccf57aaf55e1a"
   })).toEqual([
-    "--title", "grok-hybrid → MP",
+    "--title", "cursor-primary → api-model",
     "--text", "你好，我现在用了grok hybird，默认模型仍是cursor grok吗？",
     "--level", "warn",
     "--source", "cursor2response",
@@ -228,7 +270,7 @@ test.each([false, true])("notifies with the last user prompt during tool continu
     const notifyLog = path.join(config.stateDirectory, "notify.log");
     const script = path.join(config.stateDirectory, "notify-send");
     await writeFile(script, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(notifyLog)}\n`, { mode: 0o755 });
-    const create = () => new GrokHybridRoute({ ...config, notifyCommand: script }, request, () => {},
+    const create = () => new ApiFallbackRoute({ ...config, notifyCommand: script }, request, () => {},
       (async () => Response.json({ id: "resp-mp", object: "response", status: "completed", output: [] })));
     await (await create().recover(new CursorSdkContextOverflowError("SDK compacted", true), published))?.text();
     await (await create().initialResponse())!.text();
@@ -245,11 +287,11 @@ test.each([false, true])("notifies with the last user prompt during tool continu
     expect(lines[0]).toContain("traceId=resp-one");
     expect(lines[0]).toContain("cursor2response");
     expect(lines[0]).not.toContain("thisTurn=");
-    expect(hybridConfig({
-      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL: "https://fallback.example/v1",
-      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY: "key",
-      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL: "mp-grok",
-      CURSOR2RESPONSE_GROK_HYBRID_NOTIFY: "0"
+    expect(apiFallbackConfig({
+      C2R_PRIMARY_MODEL: "cursor-primary",
+      C2R_FALLBACK_BASE_URL: "https://fallback.example/v1",
+      C2R_FALLBACK_API_KEY: "key",
+      C2R_FALLBACK_MODEL: "mp-grok"
     })?.notifyCommand).toBeUndefined();
   });
 });

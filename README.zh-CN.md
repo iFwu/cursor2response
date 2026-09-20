@@ -99,7 +99,7 @@ env_key = "CURSOR_API_KEY"
 }
 ```
 
-> **提示**：若配置了 `agents.defaults.models` 白名单，需同步加入 `cursor2response/MODEL_ID`。实际使用建议根据模型特性合理配置 `contextWindow` 与 `agents.defaults.contextTokens`，详见[上下文预算说明](docs/specs/grok-hybrid.md#client-context-budgets)。
+> **提示**：若配置了 `agents.defaults.models` 白名单，需同步加入 `cursor2response/MODEL_ID`。实际使用建议根据模型特性合理配置 `contextWindow` 与 `agents.defaults.contextTokens`，详见[上下文预算说明](docs/specs/api-fallback.md#client-context-budgets)。
 
 ### Claude Code（兼容模式）
 
@@ -135,7 +135,7 @@ Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生�
 | **同一 Run 内工具续接** | 客户端返回的工具结果直接结算原 SDK Run 挂起的回调，维持 SDK 内部 agent loop 完整。 |
 | **Native Steer** | 运行中的 Run 支持通过 `Run.steer()` 顺序接入新指令，无需中断当前执行。 |
 | **Trace Viewer** | 本地可视化面板，直观审计会话历史、上下文重放、工具耗时与运行时归属。 |
-| **上下文溢出 Fallback** | 启用 `grok-hybrid` 后，遭遇 SDK context compaction 时无缝切换至配置的外部 Responses 端点。 |
+| **上下文溢出 Fallback** | 选择 `cursor-auto` 后，确认 SDK context compaction 时将会话标记为使用配置的外部 Responses 端点。 |
 | **原生系统提示词扩展** | 请求支持 `system_prompt` 参数，可自定义或完全剥离 Cursor 默认系统提示词。 |
 | **清晰的执行边界** | 区分过程思考与最终回复；支持精准关联取消；重启后支持恢复已干净完结的 Agent。 |
 
@@ -146,7 +146,7 @@ Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生�
 - **请求与 Run 解耦**：一次 HTTP 请求不等于一次 SDK Run。多次工具往返均在同一 Run 内闭环，避免每次工具返回都重新组装模型上下文。
 - **多轮复用与 Steering**：新轮次可在同一 Agent 上开启新 Run；若上一次执行尚未结束，新指令可通过 native steer 机制排队注入。
 - **前缀匹配与重放保护**：复用严格基于对话历史的前缀哈希比对。若检测到客户端对历史进行了总结压缩或手动修改，网关自动回退为全量重放，保障上下文一致性。
-- **Grok Hybrid 路由策略**：使用 `grok-hybrid` 或 `grok-hybrid-fast` 时，仅在确认触发 SDK context compaction 且当前请求尚未对外输出内容时执行安全降级，此后该会话固定沿外部端点继续。详见[路由契约](docs/specs/grok-hybrid.md)。
+- **API fallback**：选择 `cursor-auto`，并配置必填的 `C2R_PRIMARY_MODEL`、`C2R_FALLBACK_BASE_URL`、`C2R_FALLBACK_API_KEY`、`C2R_FALLBACK_MODEL`。确认 SDK compaction 后将会话标记为 fallback；当前请求只有尚未对外输出且 SDK 清理成功时才能自动补救。详见[配置方法](docs/runbooks/local-deployment.md#optional-api-fallback-route)与[路由契约](docs/specs/api-fallback.md)。
 - **原生 `system_prompt` 覆盖**：Responses 请求可传入非空字符串直接替换 Cursor SDK 默认系统提示词，或传 `false` 使用默认配置（需账号权限支持）。详见[系统提示词契约](docs/specs/responses-agent-context-affinity.md#native-system-prompt)。
 
 ## 项目缘起

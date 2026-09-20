@@ -6,7 +6,7 @@ const MAX_PENDING_BYTES = 16 * 1024 * 1024;
 
 // Protocol framing is independent of best-effort trajectory observation. Never
 // publish a partial frame: a transport reset must not corrupt the failure event.
-export function guardHybridStream(response: Response): Response {
+export function guardFallbackStream(response: Response): Response {
   if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
   const reader = response.body.getReader();
   let pending = Buffer.alloc(0);
@@ -31,7 +31,7 @@ export function guardHybridStream(response: Response): Response {
           const { value, done } = await reader.read();
           if (cancelled) return;
           if (done) {
-            fail(controller, "hybrid_fallback_missing_terminal");
+            fail(controller, "api_fallback_missing_terminal");
             reader.releaseLock();
             return;
           }
@@ -46,7 +46,7 @@ export function guardHybridStream(response: Response): Response {
               scanFrom = Math.max(0, pending.length - 3);
               break;
             }
-            if (boundary.index > MAX_PENDING_BYTES) throw new HttpError("SSE frame too large", 502, "hybrid_fallback_frame_too_large");
+            if (boundary.index > MAX_PENDING_BYTES) throw new HttpError("SSE frame too large", 502, "api_fallback_frame_too_large");
             const end = boundary.index + boundary.length;
             const frame = pending.subarray(0, end);
             const data = frame.toString("utf8").split(/\r\n|\r|\n/)
@@ -55,7 +55,7 @@ export function guardHybridStream(response: Response): Response {
             if (data && data !== "[DONE]") {
               let event;
               try { event = JSON.parse(data); } catch {
-                throw new HttpError("Invalid SSE event", 502, "hybrid_fallback_invalid_stream");
+                throw new HttpError("Invalid SSE event", 502, "api_fallback_invalid_stream");
               }
               if (event && typeof event === "object") {
                 const result = event.response;
@@ -68,19 +68,19 @@ export function guardHybridStream(response: Response): Response {
                 if (["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(event.type)) terminal = true;
               }
             } else if (data === "[DONE]" && !terminal) {
-              throw new HttpError("Missing Responses terminal event", 502, "hybrid_fallback_missing_terminal");
+              throw new HttpError("Missing Responses terminal event", 502, "api_fallback_missing_terminal");
             }
             controller.enqueue(frame);
             emitted = true;
             pending = pending.subarray(end);
             scanFrom = 0;
           }
-          if (pending.length > MAX_PENDING_BYTES) throw new HttpError("SSE frame too large", 502, "hybrid_fallback_frame_too_large");
+          if (pending.length > MAX_PENDING_BYTES) throw new HttpError("SSE frame too large", 502, "api_fallback_frame_too_large");
           if (emitted) return;
         }
       } catch (error) {
         if (cancelled) return;
-        fail(controller, error instanceof HttpError ? error.code : "hybrid_fallback_stream_failed");
+        fail(controller, error instanceof HttpError ? error.code : "api_fallback_stream_failed");
         await reader.cancel(error).catch(() => undefined);
         reader.releaseLock();
       }

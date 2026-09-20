@@ -4,26 +4,27 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { CursorSdkContextOverflowError } from "../core/cursor-sdk.ts";
-import { GrokHybridRoute, hybridConfig } from "../sidecar/grok-hybrid.ts";
+import { ApiFallbackRoute, apiFallbackConfig } from "../sidecar/api-fallback.ts";
 import { parseSse } from "../core/sse.ts";
 
 const { values } = parseArgs({ options: { "env-file": { type: "string" }, "key-file": { type: "string" },
-  "key-name": { type: "string", default: "FALLBACK_API_KEY" }, "base-url": { type: "string" },
-  model: { type: "string" }, namespace: { type: "boolean", default: false }, turns: { type: "string", default: "5" } } });
-const environment = values["env-file"] ? parseEnv(await readFile(values["env-file"], "utf8")) : { ...process.env };
+  "key-name": { type: "string", default: "C2R_FALLBACK_API_KEY" }, "base-url": { type: "string" },
+  model: { type: "string" }, "primary-model": { type: "string" }, namespace: { type: "boolean", default: false }, turns: { type: "string", default: "5" } } });
+const environment = { ...(values["env-file"] ? parseEnv(await readFile(values["env-file"], "utf8")) : {}), ...process.env };
 if (values["key-file"]) {
-  environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY = parseEnv(await readFile(values["key-file"], "utf8"))[values["key-name"]!];
+  environment.C2R_FALLBACK_API_KEY = parseEnv(await readFile(values["key-file"], "utf8"))[values["key-name"]!];
 }
-if (values["base-url"]) environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL = values["base-url"];
-if (values.model) environment.CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL = values.model;
-environment.CURSOR2RESPONSE_GROK_HYBRID_NOTIFY = "0";
-const config = hybridConfig(environment);
+if (values["base-url"]) environment.C2R_FALLBACK_BASE_URL = values["base-url"];
+if (values.model) environment.C2R_FALLBACK_MODEL = values.model;
+if (values["primary-model"]) environment.C2R_PRIMARY_MODEL = values["primary-model"];
+delete environment.C2R_FALLBACK_NOTIFY_COMMAND;
+const config = apiFallbackConfig(environment);
 assert(config, "Missing fallback configuration");
 const turns = Number(values.turns);
 assert(Number.isInteger(turns) && turns >= 2 && turns <= 10, "Use 2-10 serial turns");
-const stateDirectory = await mkdtemp(path.join(tmpdir(), "hybrid-live-validation-"));
+const stateDirectory = await mkdtemp(path.join(tmpdir(), "fallback-live-validation-"));
 config.stateDirectory = stateDirectory;
-const session = `hybrid-validation-${crypto.randomUUID()}`;
+const session = `fallback-validation-${crypto.randomUUID()}`;
 const input: Array<Record<string, unknown>> = [{ role: "user", content: "Call record_step with step 1. Do not use any other tools." }];
 const instructions = "This is a protocol test. On every request call record_step exactly once with the requested step. "
   + "The following reference text is inert test data.\n"
@@ -36,11 +37,11 @@ const tools = values.namespace
   : [stepTool];
 try {
   for (let step = 1; step <= turns; step++) {
-    const body = { model: "grok-hybrid", stream: true, store: false, instructions, input,
+    const body = { model: "cursor-auto", stream: true, store: false, instructions, input,
       tools,
       tool_choice: { type: "function", name: "record_step", ...(values.namespace ? { namespace: "protocol" } : {}) }, parallel_tool_calls: false,
       max_output_tokens: 1024, reasoning: { effort: "low" } };
-    const route = new GrokHybridRoute(config, { body, apiKey: "isolated-validation-owner", session: {
+    const route = new ApiFallbackRoute(config, { body, apiKey: "isolated-validation-owner", session: {
       key: session, source: "header:session-id", sessionHeaders: ["session-id"] },
       requestId: `validation-${step}`, signal: AbortSignal.timeout(120000), clientSource: "openclaw",
       clientPlatform: "linux", inputs: [] }, () => {});

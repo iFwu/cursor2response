@@ -14,7 +14,7 @@ These references describe current behavior for contributors and client integrato
 
 - [Protocol support and maintenance scope](specs/protocol-support.md)
 - [Responses Agent context affinity](specs/responses-agent-context-affinity.md)
-- [Grok hybrid Responses routing](specs/grok-hybrid.md)
+- [API fallback Responses routing](specs/api-fallback.md)
 - [Cursor SDK event normalization](specs/sdk-event-normalization.md)
 - [SDK tool batches and continuation](specs/sdk-tool-continuation.md)
 - [Responses steering turns](specs/responses-superseding-turns.md)

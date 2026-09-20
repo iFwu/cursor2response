@@ -29,7 +29,7 @@ curl --fail http://127.0.0.1:8100/api/runtime
 
 The runtime proxy must return a current Bridge snapshot, including process identity. Viewer health alone does not establish correct Bridge authentication or trace ingestion. Inspect bounded startup output with `docker compose logs --tail 100` and exercise a representative Responses request.
 
-The Compose file is the source of truth for volume names and container mount paths. Preserve the volumes that hold SDK HOME/checkpoints, Bridge indexes, optional hybrid route markers, failure traces, and shared structured logs. Never mount the whole host HOME as a shortcut for client path compatibility.
+The Compose file is the source of truth for volume names and container mount paths. Preserve the volumes that hold SDK HOME/checkpoints, Bridge indexes, optional fallback route markers, failure traces, and shared structured logs. Never mount the whole host HOME as a shortcut for client path compatibility.
 
 For an update, review the source changes and configuration, back up durable state when needed, then run:
 
@@ -67,26 +67,20 @@ HOST=127.0.0.1
 PORT=6718
 ```
 
-In each of three terminals, load the trusted, locally edited `.env` before the corresponding process. Shell sourcing executes the file as shell code, so do not source unreviewed downloaded configuration:
+Start Bridge, then Sidecar, then Viewer in separate terminals. Node's native
+`--env-file` loads dotenv values without shell execution. Existing process
+environment variables take precedence over values in the file:
 
 ```bash
-set -a
-. ./.env
-set +a
-```
-
-Start Bridge, then Sidecar, then Viewer in those terminals:
-
-```bash
-node scripts/structured-log-runner.mjs bridge -- node bridge/server.mjs
+node --env-file=.env scripts/structured-log-runner.mjs bridge -- node bridge/server.mjs
 ```
 
 ```bash
-node scripts/structured-log-runner.mjs sidecar -- node dist/runtime/sidecar/server.js
+node --env-file=.env scripts/structured-log-runner.mjs sidecar -- node dist/runtime/sidecar/server.js
 ```
 
 ```bash
-node tools/trace-viewer/server.mjs
+node --env-file=.env tools/trace-viewer/server.mjs
 ```
 
 The runner keeps bounded structured logs under `${XDG_STATE_HOME:-~/.local/state}/cursor2response/logs`; set `CURSOR2RESPONSE_TRACE_LOG_DIR` consistently for all three processes to override it. Ctrl-C stops a foreground process. The `node server.mjs start` launcher starts only API and Bridge through the same structured-log runner and manages its own internal token. Use Compose or the explicit commands above to configure the Viewer and Bridge authentication together.
@@ -102,7 +96,7 @@ NO_PROXY=localhost,127.0.0.1,0.0.0.0,::1,bridge,api,viewer
 NODE_USE_ENV_PROXY=1
 ```
 
-Only the Bridge receives these Compose settings, so Cursor SDK upstream traffic uses the proxy while Sidecar-to-Bridge and Viewer traffic stays local. `node server.mjs start` loads the repository `.env` before starting its child processes. For direct three-terminal execution, source `.env` before launching Node as shown above; `NODE_USE_ENV_PROXY` and `NODE_EXTRA_CA_CERTS` are startup settings.
+Only the Bridge receives these Compose settings, so Cursor SDK upstream traffic uses the proxy while Sidecar-to-Bridge and Viewer traffic stays local. `node server.mjs start` loads the repository `.env` before starting its child processes. For direct execution, use `--env-file` as shown above; `NODE_USE_ENV_PROXY` and `NODE_EXTRA_CA_CERTS` are startup settings.
 
 Some proxies cannot carry the SDK's HTTP/2 bidirectional stream. Set `CURSOR_SDK_USE_HTTP1_FOR_AGENT=1` to make the local SDK transport use HTTP/1.1 with SSE. Leave it unset unless the normal path fails.
 
@@ -133,17 +127,44 @@ Completed clean Agents are indexed under `${CURSOR_SDK_BRIDGE_AGENT_STATE_DIR:-$
 
 A restart during a run, exposed tool batch, or cancellation does not preserve pending ownership. An Agent ID file is not proof that a tool callback survived. Verify clean resume with an independent follow-up using the same model and session, and inspect `agentResumed`, `promptSource`, and recovery events. Verify dirty-state recovery separately.
 
-## Optional Grok hybrid route
+## Optional api-fallback route
 
-The fallback requires all three settings:
+Select `model: "cursor-auto"` in the client. All four settings are required:
 
 ```dotenv
-CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL=https://gateway.example/v1
-CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY=replace-with-dedicated-key
-CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL=upstream-model
+C2R_PRIMARY_MODEL=cursor-model
+C2R_FALLBACK_BASE_URL=https://gateway.example/v1
+C2R_FALLBACK_API_KEY=replace-with-dedicated-key
+C2R_FALLBACK_MODEL=upstream-model
 ```
 
-The base URL excludes `/responses`. The optional `CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_TIMEOUT_MS` defaults to 180000. Keep route state under `CURSOR2RESPONSE_GROK_HYBRID_STATE_DIR` or the default local state directory across restarts. Verify the configured provider's Responses semantics, tool continuation, and billing before enabling the route. See the [routing contract](../specs/grok-hybrid.md).
+`C2R_PRIMARY_MODEL` must name an available Cursor model; `C2R_FALLBACK_MODEL`
+must name a model accepted by the external API. They may differ. For a Grok
+fast primary, set `C2R_PRIMARY_MODEL=grok-4.6-fast`; there is no separate
+`cursor-auto-fast` alias. Other client model choices continue to use the SDK
+directly. This configures one route, not per-model mappings or a fallback chain.
+
+The base URL excludes `/responses`. `C2R_FALLBACK_TIMEOUT_MS` defaults to 180000
+and covers response headers and body. `C2R_FALLBACK_STATE_DIR` defaults to
+`${XDG_STATE_HOME:-~/.local/state}/cursor2response/fallback-routes`. Preserve this
+directory across restarts. In Compose it lives in the existing `api-state`
+volume; change mount paths through a Compose override rather than using host
+paths inside containers.
+
+Compose reads these values from `.env`, or from
+`docker compose --env-file /path/to/runtime.env up -d --build`. It explicitly
+passes the four route settings and timeout only to the API service. Direct Node
+uses `--env-file=/path/to/runtime.env`; the local launcher also loads repository
+`.env`, with process environment taking precedence. A systemd deployment can
+use `EnvironmentFile=` for the same keys. Keep files containing credentials
+private (0600); do not put them in Git or command-line arguments.
+
+Notifications are off by default. Direct Node deployments may set
+`C2R_FALLBACK_NOTIFY_COMMAND` to an executable implementing the notification
+arguments in the spec. Container deployments require an explicitly installed
+executable and Compose override. Verify the provider's Responses semantics,
+tool continuation, and billing before enabling the route. See the
+[routing contract](../specs/api-fallback.md).
 
 ## Trace data
 

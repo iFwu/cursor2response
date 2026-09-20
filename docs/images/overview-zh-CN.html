@@ -39,7 +39,7 @@ html[lang="zh-CN"] .hero p{font-size:37px}html[lang="zh-CN"] .continuity h2{font
       <section class="steer"><h2>原生 Native Steer</h2><p>新指令直接按序注入活跃 Run，无需中断当前执行。</p></section>
     </aside>
   </div>
-  <section class="fallback"><div><span class="flag">可选 · GROK HYBRID</span><h2>上下文溢出安全降级</h2></div><p>遭遇 SDK context compaction 且满足安全条件时，无缝切换至<strong>备用 Responses 端点</strong>；会话自动锁定该路由。</p></section>
+  <section class="fallback"><div><span class="flag">可选 · API FALLBACK</span><h2>上下文溢出安全降级</h2></div><p>遭遇 SDK context compaction 且满足安全条件时，切换至<strong>备用 Responses 端点</strong>；会话自动锁定该路由。</p></section>
   <footer class="footer"><a href="https://github.com/ifwu/cursor2response">github.com/ifwu/cursor2response</a><span class="boundary">本地运行网关 · 云端提供模型</span></footer>
 </main>
 </body>
