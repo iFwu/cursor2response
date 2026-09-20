@@ -115,7 +115,7 @@ function assertDependencies() {
   if (!existsSync(path.join(repoRoot, "node_modules", "@cursor", "sdk"))) {
     throw new Error(`Dependencies missing. Run 'npm ci' in ${repoRoot} first.`);
   }
-  if (Number(process.versions.node.split(".")[0]) !== 24) throw new Error("Node.js 24 LTS is required.");
+  if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Node.js 24 or later is required.");
   if (!existsSync(SIDECAR_SCRIPT)) throw new Error("Server build missing. Run 'npm run build:server' first.");
 }
 

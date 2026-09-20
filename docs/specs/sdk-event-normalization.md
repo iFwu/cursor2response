@@ -74,9 +74,9 @@ message is emitted, the validated `Run.wait()` result remains authoritative.
 
 `@cursor/sdk@1.0.31` suppresses `summary-started`, `summary`, and
 `summary-completed` before its documented per-send `onDelta` callback. The
-Bridge registers `bridge/cursor-sdk-summary-loader.mjs` before loading the SDK
-and removes only that suppression predicate from the loaded ESM source. The
-loader requires the exact package name, version, resolved ESM entry, and one
+Bridge registers the synchronous hook in `bridge/cursor-sdk-summary-loader.mjs`
+before loading the SDK and removes only that suppression predicate from the
+loaded ESM source. The hook requires the exact package name, version, resolved ESM entry, and one
 exact source signature match. Any drift prevents Bridge startup; there is no
 fallback to the public `task` event.
 

@@ -47,10 +47,10 @@ describe("Cursor SDK summary loader", () => {
   it("loads the real SDK through the hook in a child process", () => {
     const loaderUrl = new URL("./cursor-sdk-summary-loader.mjs", import.meta.url).href;
     const source = `
-      import { register } from "node:module";
-      import { CURSOR_SDK_SUMMARY_HOOK_MARKER, resolveCursorSdkLoadContract } from ${JSON.stringify(loaderUrl)};
+      import { registerHooks } from "node:module";
+      import { CURSOR_SDK_SUMMARY_HOOK_MARKER, createCursorSdkSummaryHooks, resolveCursorSdkLoadContract } from ${JSON.stringify(loaderUrl)};
       const contract = resolveCursorSdkLoadContract();
-      register(${JSON.stringify(loaderUrl)}, { parentURL: import.meta.url, data: contract });
+      registerHooks(createCursorSdkSummaryHooks(contract));
       await import(contract.entryUrl);
       const marker = globalThis[Symbol.for(CURSOR_SDK_SUMMARY_HOOK_MARKER)];
       if (marker?.version !== contract.packageVersion || marker?.url !== contract.entryUrl) process.exit(2);

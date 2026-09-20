@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import http from "node:http";
-import { register } from "node:module";
+import { registerHooks } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -10,16 +10,14 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   CURSOR_SDK_SUMMARY_HOOK_MARKER,
+  createCursorSdkSummaryHooks,
   resolveCursorSdkLoadContract
 } from "./cursor-sdk-summary-loader.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const cursorSdkLoadContract = resolveCursorSdkLoadContract();
-register(new URL("./cursor-sdk-summary-loader.mjs", import.meta.url), {
-  parentURL: import.meta.url,
-  data: cursorSdkLoadContract
-});
+registerHooks(createCursorSdkSummaryHooks(cursorSdkLoadContract));
 const { Agent, Cursor } = await import(cursorSdkLoadContract.entryUrl);
 const cursorSdkSummaryHookMarker = globalThis[Symbol.for(CURSOR_SDK_SUMMARY_HOOK_MARKER)];
 if (

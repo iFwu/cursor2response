@@ -157,7 +157,7 @@ Through intensive real-world use with Codex and OpenClaw, it evolved to incorpor
 
 - **Primary API:** `/v1/responses`, including streaming, client tools, tool-result continuation, and session affinity. Codex and OpenClaw serve as the main acceptance paths.
 - **Best effort:** `/v1/chat/completions`, `/v1/messages`, and `/v1/messages/count_tokens`. These endpoints do not claim full protocol conformance.
-- **Runtime:** Node.js 24 LTS across all services via local Docker Compose or source execution (Docker stack verified on Linux amd64).
+- **Runtime:** Source execution supports Node.js 24 or later (verified on Node 24 and 26). The Linux amd64 Docker image stays pinned to Node.js 24 LTS for a stable deployment baseline.
 - **Conversation history:** Clients must preserve and send the full public history (including tool calls, results, and phases); `previous_response_id` does not replace that history.
 - **Restart behavior:** Compose volumes persist SDK checkpoints and Bridge state. Cleanly completed Agents can resume after restart; active Runs and pending tool callbacks do not survive process replacement.
 - **Context accounting:** Token counts are character-based estimates, not authoritative SDK context measurements. A successful single prompt does not establish a safe multi-turn context ceiling.
@@ -167,7 +167,7 @@ See [protocol support](docs/specs/protocol-support.md) for detailed contracts.
 
 ## Run from source
 
-To run directly with Node.js 24 LTS and npm:
+To run directly with Node.js 24 or later and npm:
 
 ```bash
 npm ci

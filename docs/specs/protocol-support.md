@@ -13,7 +13,7 @@ The supported runtime is the local Sidecar plus SDK Bridge:
   snapshot. It does not infer live pending ownership from historical journals;
   its availability and parsing do not affect the Responses path.
 
-Deployment is local, using Docker Compose or Node.js 24 LTS. Shared `core/` code is part of the local runtime, not an independently deployed service.
+Deployment is local. Docker Compose uses the pinned Node.js 24 LTS image; direct source execution supports Node.js 24 or later. Shared `core/` code is part of the local runtime, not an independently deployed service.
 
 ## Protocol priority
 

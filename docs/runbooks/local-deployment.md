@@ -2,7 +2,9 @@
 
 ## Supported layouts
 
-Docker Compose starts the API, SDK Bridge, and Trace Viewer together. Node.js 24 LTS can run the same source directly. Use one layout per configured port and state directory. Do not point a test candidate at an existing deployment's state.
+Docker Compose starts the API, SDK Bridge, and Trace Viewer together on the pinned Node.js 24 LTS image. Direct source execution supports Node.js 24 or later and is verified on Node 24 and 26. Use one layout per configured port and state directory. Do not point a test candidate at an existing deployment's state.
+
+The package accepts later Node majors, but each newly released major still needs the full test and operations suites before it becomes a verified runtime. Docker remains the reproducible fallback when a newer host runtime exposes an incompatibility.
 
 The API defaults to `127.0.0.1:6718`; Compose publishes the Viewer at `127.0.0.1:8100`. The Bridge is internal in Compose. The standalone Viewer defaults to `127.0.0.1:4319`.
 
@@ -44,7 +46,7 @@ Recheck health, runtime identity, served Viewer assets, and the behavior affecte
 
 This is the complete three-process layout with shared Bridge authentication. If you previously used `node server.mjs start`, stop that managed stack with `node server.mjs stop` before using these commands on the same ports. The launcher generates a separate internal token; starting `npm run trace:viewer` beside it does not automatically connect runtime inspection.
 
-Install Node.js 24 LTS, then:
+Install Node.js 24 or later, then:
 
 ```bash
 npm ci

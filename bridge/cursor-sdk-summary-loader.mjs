@@ -6,8 +6,6 @@ export const CURSOR_SDK_SUMMARY_HOOK_VERSION = "1.0.31";
 export const CURSOR_SDK_SUMMARY_HOOK_MARKER = "cursor2response.cursor-sdk-summary-hook";
 export const CURSOR_SDK_SUMMARY_FILTER_SIGNATURE = "function(e){return\"summary\"===e.type||\"summary-started\"===e.type||\"summary-completed\"===e.type}(e)";
 
-let loaderContract = null;
-
 export function resolveCursorSdkLoadContract(resolve = (specifier) => import.meta.resolve(specifier)) {
   const entryUrl = resolve("@cursor/sdk");
   if (typeof entryUrl !== "string" || !entryUrl.startsWith("file:")) {
@@ -63,24 +61,24 @@ export function transformCursorSdkSource(source, contract) {
   return `${text.replace(CURSOR_SDK_SUMMARY_FILTER_SIGNATURE, "false")}\n;globalThis[Symbol.for(${JSON.stringify(CURSOR_SDK_SUMMARY_HOOK_MARKER)})]=Object.freeze(${marker});\n`;
 }
 
-export function initialize(data) {
-  assertLoaderContract(data);
-  loaderContract = data;
-}
-
-export async function load(url, context, nextLoad) {
-  const loaded = await nextLoad(url, context);
-  if (!loaderContract || url !== loaderContract.entryUrl) return loaded;
-  if (loaded.format !== "module" || loaded.source === null || loaded.source === undefined) {
-    throw summaryHookContractError(`@cursor/sdk ESM loader returned unsupported format ${String(loaded.format)}`);
-  }
+export function createCursorSdkSummaryHooks(contract) {
+  assertLoaderContract(contract);
   return {
-    ...loaded,
-    source: transformCursorSdkSource(loaded.source, {
-      url,
-      expectedUrl: loaderContract.entryUrl,
-      packageVersion: loaderContract.packageVersion
-    })
+    load(url, context, nextLoad) {
+      const loaded = nextLoad(url, context);
+      if (url !== contract.entryUrl) return loaded;
+      if (loaded.format !== "module" || loaded.source === null || loaded.source === undefined) {
+        throw summaryHookContractError(`@cursor/sdk ESM loader returned unsupported format ${String(loaded.format)}`);
+      }
+      return {
+        ...loaded,
+        source: transformCursorSdkSource(loaded.source, {
+          url,
+          expectedUrl: contract.entryUrl,
+          packageVersion: contract.packageVersion
+        })
+      };
+    }
   };
 }
 

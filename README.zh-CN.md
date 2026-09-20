@@ -157,7 +157,7 @@ Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生�
 
 - **核心协议：** `/v1/responses`，全面支持流式传输、客户端工具定义、工具结果连续回传及会话亲和性。Codex 与 OpenClaw 为核心验收标准。
 - **兼容端点（Best Effort）：** `/v1/chat/completions`、`/v1/messages` 及 `/v1/messages/count_tokens` 仅作基础功能适配，不承诺所有上游参数行为完全对齐。
-- **运行时：** 全链路采用 Node.js 24 LTS，支持 Docker Compose 或源码运行（Docker 镜像在 Linux amd64 充分验证）。
+- **运行时：** 源码运行支持 Node.js 24 及以上版本（已验证 Node 24 与 26）；Linux amd64 Docker 镜像继续固定 Node.js 24 LTS，作为稳定部署基线。
 - **客户端历史要求：** 客户端必须自行维护并传回完整的上下文历史（包括工具调用、返回结果与阶段标注）；`previous_response_id` 不能替代历史内容。
 - **状态持久化：** Docker Compose 持久化 SDK checkpoint 与 Bridge 状态索引。正常退出的 Agent 重启后可无缝恢复，但运行中的任务与待返回的工具回调无法跨进程恢复。
 - **上下文计量：** 网关返回的 token 用量为基于字符的估算值，不代表 Cursor SDK 内部真实窗口占用；单次长 prompt 成功不代表多轮交互的安全上限。
@@ -167,7 +167,7 @@ Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生�
 
 ## 源码运行
 
-若需直接通过 Node.js 24 LTS 与 npm 运行：
+若需直接通过 Node.js 24 及以上版本与 npm 运行：
 
 ```bash
 npm ci
