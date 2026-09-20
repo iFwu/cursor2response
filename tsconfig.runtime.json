@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist/runtime",
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "core/**/*.ts",
+    "sidecar/**/*.ts",
+    "scripts/validate-grok-hybrid.ts",
+    "scripts/validate-responses-phases.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/test-helpers.ts"
+  ]
+}

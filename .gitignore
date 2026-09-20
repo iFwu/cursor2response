@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment & secrets (never commit real keys)
+.env
+.env.*
+!.env.example
+.dev.vars
+*.key
+*.key.pub
+*.pem
+*.pfx
+*.p12
+*.p12.password
+*-password.txt
+apple-app-password.txt
+credentials.json
+**/secrets.json
+
+# Logs & local runtime (sidecar / bridge helpers)
+*.log
+.local/
+.runtime/
+.cursor2response/
+CursorApiBridge*/
+
+# Lab / working copies & agent config backups
+*.work
+*.work.*
+*.bak
+*.backup
+
+# Test & tooling cache
+coverage/
+.nyc_output/
+.vite/
+
+# Sample / scratch
+sample-projects/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Container and local validation outputs
+.validation/
+compose.override.yaml
+compose.override.yml

@@ -1,0 +1,63 @@
+{
+  "name": "cursor2response",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Cursor gateway focused on the OpenAI Responses API.",
+  "scripts": {
+    "server": "node server.mjs",
+    "start:local": "node server.mjs start",
+    "stop:local": "node server.mjs stop",
+    "trace:viewer": "npm run trace:viewer:build --silent && node tools/trace-viewer/server.mjs",
+    "trace:viewer:build": "vite build --config tools/trace-viewer/vite.config.mjs",
+    "trace:viewer:dev": "vite --config tools/trace-viewer/vite.config.mjs",
+    "trace:viewer:test": "node --test tools/trace-viewer/*.test.mjs",
+    "trace:viewer:typecheck": "tsc -p tools/trace-viewer/tsconfig.json",
+    "test": "vitest run",
+    "test:sidecar": "npm run build:server && vitest run sidecar",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p sidecar/tsconfig.json",
+    "bridge": "node bridge/server.mjs",
+    "test:logs": "node --test scripts/structured-log-runner.test.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "test:operations": "npm run build:server && node --test scripts/*.test.mjs",
+    "build:server": "tsc -p tsconfig.runtime.json",
+    "build": "npm run build:server && npm run trace:viewer:build",
+    "pretest": "npm run build:server"
+  },
+  "keywords": [
+    "cursor",
+    "composer",
+    "openai",
+    "chat-completions",
+    "responses-api"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.0.31",
+    "antd": "^6.6.1",
+    "lucide-react": "^0.557.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.13",
+    "vitest": "^4.0.15"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ifwu/cursor2response.git"
+  },
+  "homepage": "https://github.com/ifwu/cursor2response",
+  "bugs": {
+    "url": "https://github.com/ifwu/cursor2response/issues"
+  }
+}

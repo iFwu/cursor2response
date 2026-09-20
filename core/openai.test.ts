@@ -1,0 +1,4059 @@
+import { describe, expect, it } from "vitest";
+import { HttpError } from "./http.ts";
+import {
+  EMPTY_RESPONSES_TURN_MESSAGE,
+  chatToolResults,
+  isEmptyResponsesTurn,
+  prepareChatRequest,
+  prepareOpencodeSdkChatRequest,
+  prepareResponsesRequest,
+  prepareResponsesFollowUpPrompt,
+  chatCompletionResponse,
+  chatUsageChunk,
+  responseFailedEvent,
+  responseDoneEvents,
+  responseObject,
+  responseToolContinuation,
+  responseToolResults,
+  responseToolResultsCanReplay,
+  toolCallRetryHint,
+  toOpenAiToolCalls
+} from "./openai.ts";
+
+describe("Responses assistant phases", () => {
+  it.each([undefined, "commentary", "final_answer"] as const)(
+    "preserves the confirmed phase %s without inferring it from tools",
+    (phase) => {
+      const input = {
+        id: "resp_phase", created: 1, model: "cursor-grok", text: "Workspace checked.",
+        promptChars: 1, phase
+      };
+      const response = responseObject(input);
+      const events = responseDoneEvents(input).map((bytes) => {
+        const data = new TextDecoder().decode(bytes).split("\n")
+          .find((line) => line.startsWith("data: "))!;
+        return JSON.parse(data.slice(6));
+      });
+      const message = events.find((event) => event.type === "response.output_item.done").item;
+      expect(message).toEqual((response.output as unknown[])[0]);
+      expect(events.find((event) => event.type === "response.completed").response).toEqual(response);
+      if (phase) expect(message.phase).toBe(phase);
+      else expect(message).not.toHaveProperty("phase");
+    }
+  );
+});
+
+describe("empty Responses turn detection", () => {
+  it("flags a turn with neither text nor tool calls", () => {
+    expect(isEmptyResponsesTurn({ text: "", toolCallCount: 0 })).toBe(true);
+    expect(isEmptyResponsesTurn({ text: "   \n", toolCallCount: 0 })).toBe(true);
+  });
+
+  it("leaves real answers and tool-call turns alone", () => {
+    expect(isEmptyResponsesTurn({ text: "done", toolCallCount: 0 })).toBe(false);
+    expect(isEmptyResponsesTurn({ text: "", toolCallCount: 1 })).toBe(false);
+  });
+
+  it("surfaces the empty turn as a terminal failed response", () => {
+    const event = new TextDecoder().decode(responseFailedEvent({
+      id: "resp_empty",
+      created: 1_782_371_200,
+      model: "cursor-grok",
+      error: new Error(EMPTY_RESPONSES_TURN_MESSAGE)
+    }));
+    const data = JSON.parse(event.match(/^data: (.+)$/m)?.[1] ?? "{}");
+
+    expect(event).toContain("event: response.failed");
+    expect(data.type).toBe("response.failed");
+    expect(data.response.status).toBe("failed");
+    expect(data.response.error.message).toBe(EMPTY_RESPONSES_TURN_MESSAGE);
+  });
+});
+
+describe("OpenAI compatibility adapter", () => {
+  it("preserves bridge-issued call IDs within the Responses limit", () => {
+    const callId = `call_sdk_${"a".repeat(32)}_read`;
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "resp_test",
+      toolCalls: [{ callId, name: "read", arguments: { path: "README.md" } }]
+    });
+
+    expect(toolCalls[0].id).toBe(callId);
+    expect(toolCalls[0].id.length).toBeLessThanOrEqual(64);
+  });
+
+  it("collects only the contiguous trailing Responses tool results", () => {
+    expect(responseToolResults({
+      input: [
+        { type: "function_call_output", call_id: "old", output: "old result" },
+        { role: "user", content: "continue" },
+        { type: "function_call_output", call_id: "call-1", output: "first" },
+        { type: "custom_tool_call_output", call_id: "call-2", output: "second", is_error: true }
+      ]
+    })).toEqual([
+      { callId: "call-1", output: "first", isError: false },
+      { callId: "call-2", output: "second", isError: true }
+    ]);
+  });
+
+  it("collects the latest Responses tool results before a dynamic instruction suffix", () => {
+    expect(responseToolResults({
+      input: [
+        { type: "function_call_output", call_id: "old", output: "old result" },
+        { role: "user", content: "continue" },
+        { type: "function_call", call_id: "call-1", name: "read", arguments: "{}" },
+        { type: "function_call", call_id: "call-2", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-1", output: "first" },
+        { type: "function_call_output", call_id: "call-2", output: "second" },
+        { type: "message", role: "developer", content: "dynamic runtime context" }
+      ]
+    })).toEqual([
+      { callId: "call-1", output: "first", isError: false },
+      { callId: "call-2", output: "second", isError: false }
+    ]);
+  });
+
+  it("classifies a tool result followed by a new user message as a superseding turn", () => {
+    const aborted = { type: "message", role: "assistant", content: "Reply operation aborted by user." };
+    const runtime = { type: "message", role: "developer", content: "<turn_aborted>" };
+    const user = { type: "message", role: "user", content: "Start the SSH tunnel properly." };
+
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-exec", output: "aborted" },
+        aborted,
+        runtime,
+        user
+      ]
+    })).toEqual({
+      results: [{ callId: "call-exec", output: "aborted", isError: false }],
+      followUpInput: [aborted, runtime, user],
+      supersedePendingRun: true,
+      supersedingTurnAborted: true,
+      supersededToolCallIds: ["call-exec"]
+    });
+  });
+
+  it("classifies assistant commentary before a tool result as a superseding turn", () => {
+    const commentary = { type: "message", role: "assistant", content: "Checking the service." };
+    const user = { type: "message", role: "user", content: "Inspect the tunnel instead." };
+
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" },
+        commentary,
+        { type: "function_call_output", call_id: "call-exec", output: "done" },
+        user
+      ]
+    })).toEqual({
+      results: [{ callId: "call-exec", output: "done", isError: false }],
+      followUpInput: [user],
+      supersedePendingRun: true,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: ["call-exec"]
+    });
+  });
+
+  it("keeps interleaved assistant commentary inside a parallel tool batch", () => {
+    const commentary = { type: "message", role: "assistant", content: "Checking both services." };
+    const user = { type: "message", role: "user", content: "Inspect the tunnel instead." };
+
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect both services." },
+        { type: "function_call", call_id: "call-read", name: "read", arguments: "{}" },
+        commentary,
+        { type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-read", output: "config" },
+        { type: "function_call_output", call_id: "call-exec", output: "done" },
+        user
+      ]
+    })).toEqual({
+      results: [
+        { callId: "call-read", output: "config", isError: false },
+        { callId: "call-exec", output: "done", isError: false }
+      ],
+      followUpInput: [user],
+      supersedePendingRun: true,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: ["call-read", "call-exec"]
+    });
+  });
+
+  it("supersedes only the latest tool batch after earlier batches settled", () => {
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-1", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-1", output: "config" },
+        { type: "function_call", call_id: "call-2", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-2", output: "ports" },
+        { type: "function_call", call_id: "call-3", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-3", output: "aborted" },
+        { type: "message", role: "user", content: "Handle the tunnel instead." }
+      ]
+    })).toEqual({
+      results: [{ callId: "call-3", output: "aborted", isError: false }],
+      followUpInput: [{ type: "message", role: "user", content: "Handle the tunnel instead." }],
+      supersedePendingRun: true,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: ["call-3"]
+    });
+  });
+
+  it("treats a new user after a terminal assistant answer as a normal follow-up", () => {
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-1", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-1", output: "config" },
+        { type: "message", role: "assistant", content: "The service is healthy." },
+        { type: "message", role: "user", content: "Bind it to 192.0.2.1." }
+      ]
+    })).toEqual({
+      results: [],
+      followUpInput: [],
+      supersedePendingRun: false,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: []
+    });
+  });
+
+  it("classifies a missing tool result only when a new user follows that call", () => {
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" },
+        { type: "message", role: "user", content: "Stop and handle the tunnel instead." }
+      ]
+    })).toEqual({
+      results: [],
+      followUpInput: [{ type: "message", role: "user", content: "Stop and handle the tunnel instead." }],
+      supersedePendingRun: true,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: ["call-exec"]
+    });
+
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-exec", output: "done" },
+        { type: "message", role: "developer", content: "dynamic runtime context" }
+      ]
+    })).toEqual({
+      results: [{ callId: "call-exec", output: "done", isError: false }],
+      followUpInput: [],
+      supersedePendingRun: false,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: []
+    });
+  });
+
+  it("keeps a deferred user turn out of a later tool-result continuation", () => {
+    expect(responseToolContinuation({
+      input: [
+        { type: "message", role: "user", content: "Inspect the service." },
+        { type: "function_call", call_id: "call-1", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-1", output: "aborted" },
+        { type: "message", role: "user", content: "Handle the tunnel instead." },
+        { type: "function_call", call_id: "call-2", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-2", output: "contents" }
+      ]
+    })).toEqual({
+      results: [{ callId: "call-2", output: "contents", isError: false }],
+      followUpInput: [],
+      supersedePendingRun: false,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: []
+    });
+  });
+
+  it("uses previous Responses state to identify a superseding user-only input", () => {
+    expect(responseToolContinuation(
+      { input: "Handle the tunnel instead." },
+      {
+        previousInputItems: [{ type: "message", role: "user", content: "Inspect the service." }],
+        previousOutput: [{ type: "function_call", call_id: "call-exec", name: "exec", arguments: "{}" }]
+      }
+    )).toEqual({
+      results: [],
+      followUpInput: ["Handle the tunnel instead."],
+      supersedePendingRun: true,
+      supersedingTurnAborted: false,
+      supersededToolCallIds: ["call-exec"]
+    });
+  });
+
+  it("allows tool-result replay only when every trailing output matches an earlier call", () => {
+    const matchingInput = [
+      { type: "function_call", call_id: "call-1", name: "read", arguments: "{}" },
+      { type: "custom_tool_call", call_id: "call-2", name: "exec", input: "pwd" },
+      { type: "function_call_output", call_id: "call-1", output: "contents" },
+      { type: "custom_tool_call_output", call_id: "call-2", output: "/workspace" }
+    ];
+
+    expect(responseToolResultsCanReplay({ input: matchingInput })).toBe(true);
+    expect(responseToolResultsCanReplay({
+      input: [{ type: "function_call_output", call_id: "call-orphan", output: "done" }]
+    })).toBe(false);
+    expect(responseToolResultsCanReplay({
+      input: [
+        ...matchingInput,
+        { type: "function_call_output", call_id: "call-orphan", output: "done" }
+      ]
+    })).toBe(false);
+    expect(responseToolResultsCanReplay({
+      input: [
+        { type: "function_call", call_id: "call-duplicate", name: "read", arguments: "{}" },
+        { type: "function_call", call_id: "call-duplicate", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-duplicate", output: "done" }
+      ]
+    })).toBe(false);
+    expect(responseToolResultsCanReplay(
+      { input: [{ type: "function_call_output", call_id: "call-previous", output: "done" }] },
+      { previousOutput: [{ type: "function_call", call_id: "call-previous", name: "read", arguments: "{}" }] }
+    )).toBe(true);
+  });
+
+  it("collects only the contiguous trailing Chat tool results", () => {
+    expect(chatToolResults({
+      messages: [
+        { role: "tool", tool_call_id: "old", content: "old result" },
+        { role: "assistant", content: "continue" },
+        { role: "tool", tool_call_id: "call-1", content: "first" },
+        { role: "tool", tool_call_id: "call-2", content: "second" }
+      ]
+    })).toEqual([
+      { callId: "call-1", output: "first" },
+      { callId: "call-2", output: "second" }
+    ]);
+  });
+
+  it("preserves bridge status and code in terminal Responses failures", () => {
+    const event = new TextDecoder().decode(responseFailedEvent({
+      id: "resp_auth",
+      created: 1_782_371_200,
+      model: "cursor-grok",
+      error: new HttpError("Missing or invalid authorization", 401, "unauthorized"),
+      sequenceNumber: 2
+    }));
+    const data = JSON.parse(event.match(/^data: (.+)$/m)?.[1] ?? "{}");
+
+    expect(event).toContain("event: response.failed");
+    expect(data).toEqual({
+      type: "response.failed",
+      sequence_number: 2,
+      response: expect.objectContaining({
+        id: "resp_auth",
+        object: "response",
+        created_at: 1_782_371_200,
+        model: "cursor-grok",
+        status: "failed",
+        error: {
+          type: "cursor_error",
+          code: "unauthorized",
+          message: "Missing or invalid authorization",
+          param: null,
+          status_code: 401
+        }
+      })
+    });
+  });
+
+  it("uses a deterministic fallback for unknown Responses stream failures", () => {
+    const event = new TextDecoder().decode(responseFailedEvent({
+      id: "resp_unknown",
+      created: 1_782_371_200,
+      model: "cursor-grok",
+      error: "boom"
+    }));
+    const data = JSON.parse(event.match(/^data: (.+)$/m)?.[1] ?? "{}");
+
+    expect(data.response.error).toEqual({
+      type: "cursor_error",
+      code: "cursor_stream_error",
+      message: "Stream failed",
+      param: null,
+      status_code: 500
+    });
+  });
+
+  it("extracts image tool outputs without replaying data URLs as text", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "cursor-grok",
+        input: [
+          { type: "custom_tool_call", call_id: "call_image", name: "inspect", input: "return image" },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_image",
+            output: [
+              { type: "input_text", text: "screenshot captured" },
+              { type: "input_image", image_url: "data:image/png;base64,AQID" }
+            ]
+          }
+        ]
+      },
+      { id: "cursor-grok" }
+    );
+
+    expect(prepared.prompt.text.split("screenshot captured")).toHaveLength(2);
+    expect(prepared.prompt.text).toContain("[image]");
+    expect(prepared.prompt.text).not.toContain("data:image");
+    expect(prepared.prompt.text).not.toContain("AQID");
+    expect(prepared.prompt.images).toEqual([
+      { mimeType: "image/png", data: "AQID" }
+    ]);
+  });
+
+  it("converts chat messages and image URLs into Cursor prompts", () => {
+    const prepared = prepareChatRequest(
+      {
+        model: "composer-2.5",
+        messages: [
+          { role: "system", content: "Be terse." },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "What is this?" },
+              { type: "image_url", image_url: { url: "https://example.com/image.png", width: 640, height: 480 } }
+            ]
+          }
+        ],
+        max_tokens: 50
+      },
+      { id: "composer-2.5" }
+    );
+    expect(prepared.prompt.text).toContain("SYSTEM: Be terse.");
+    expect(prepared.prompt.text).toContain("USER: What is this?");
+    expect(prepared.prompt.text).toContain("within about 50 output tokens");
+    expect(prepared.prompt.images).toEqual([{ url: "https://example.com/image.png", dimension: { width: 640, height: 480 } }]);
+  });
+
+  it("converts Responses input images into Cursor prompts", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "What is in this image?" },
+              {
+                type: "input_image",
+                image_url: {
+                  url: "data:image/jpeg;base64,AQID",
+                  width: 320,
+                  height: 240
+                }
+              }
+            ]
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.prompt.text).toContain("USER: What is in this image?");
+    expect(prepared.prompt.images).toEqual([
+      { mimeType: "image/jpeg", data: "AQID", dimension: { width: 320, height: 240 } }
+    ]);
+  });
+
+  it("registers OpenAI function tools without serializing their schema into the prompt", () => {
+    const prepared = prepareChatRequest(
+      {
+        model: "composer-2.5",
+        messages: [{ role: "user", content: "list files" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "glob",
+              description: "Find files",
+              parameters: { type: "object", properties: { pattern: { type: "string" } } }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+    expect(prepared.tools).toEqual([
+      {
+        name: "glob",
+        description: "Find files",
+        parameters: { type: "object", properties: { pattern: { type: "string" } } }
+      }
+    ]);
+    expect(prepared.prompt.mode).toBe("agent");
+    expect(prepared.prompt.text).toContain("already in Agent mode");
+    expect(prepared.prompt.text).toContain("Never claim that tools are unavailable");
+    expect(prepared.prompt.text).toContain("Client tools are registered natively with Cursor SDK");
+    expect(prepared.prompt.text).not.toContain("CLIENT TOOL INVENTORY:");
+    expect(prepared.prompt.text).not.toContain('"name":"glob"');
+  });
+
+  it("never rewrites the prompt to demand a tool call, even for mutation-sounding requests", () => {
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: "write",
+          parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } }
+        }
+      }
+    ];
+    const request = {
+      model: "composer-2.5",
+      messages: [{ role: "user", content: "create ~/todo/app.ts and build the project" }],
+      tools
+    };
+    const directives = [
+      "LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST:",
+      "WORKSPACE MUTATION REQUIRED:",
+      "SDK WORKSPACE MUTATION REQUIRED:",
+      "WORKSPACE INSPECTION REQUIRED:",
+      "TOOL CALL RETRY",
+      "Your next tool call must be",
+      "Switched to agent mode successfully"
+    ];
+    const userText = "create ~/todo/app.ts and build the project";
+    for (const prepared of [
+      prepareChatRequest(request, { id: "composer-2.5" }),
+      prepareOpencodeSdkChatRequest(request, { id: "composer-2.5-sdk" }),
+      prepareResponsesRequest(
+        { model: "gpt-5.6-sol", input: [{ role: "user", content: [{ type: "input_text", text: userText }] }], tools },
+        { id: "gpt-5.6-sol" }
+      )
+    ]) {
+      for (const directive of directives) {
+        expect(prepared.prompt.text).not.toContain(directive);
+      }
+      expect(prepared.prompt.text).toContain(userText);
+    }
+  });
+
+  it("accepts bare harness tools with input_schema and maps SDK glob arguments to that schema", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "find source files" }],
+        tools: [
+          {
+            name: "glob",
+            description: "Find files",
+            input_schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                pattern: { type: "string" },
+                path: { type: "string" }
+              },
+              required: ["pattern"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools).toEqual([
+      {
+        name: "glob",
+        description: "Find files",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pattern: { type: "string" },
+            path: { type: "string" }
+          },
+          required: ["pattern"]
+        }
+      }
+    ]);
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "src", globPattern: "**/*.tsx" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("glob");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "src" });
+  });
+
+  it("registers pi find as a native SDK custom tool", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "find source files" }],
+        tool_choice: { type: "function", function: { name: "find" } },
+        tools: [
+          {
+            name: "find",
+            description: "Find files by glob pattern",
+            input_schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                pattern: { type: "string" },
+                path: { type: "string" },
+                limit: { type: "number" }
+              },
+              required: ["pattern"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["find"]);
+    expect(prepared.prompt.text).not.toContain('"name":"find"');
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "src", globPattern: "**/*.tsx" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("find");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "src" });
+  });
+
+  it("maps exact SDK MCP calls to built-in client tool schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "mcp", arguments: { providerIdentifier: "client", toolName: "glob", args: { pattern: "**/*.tsx", path: "src" } } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("glob");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "src" });
+  });
+
+  it("maps SDK grep arguments to pi grep schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "grep",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" },
+              glob: { type: "string" },
+              ignoreCase: { type: "boolean" },
+              literal: { type: "boolean" },
+              context: { type: "number" },
+              limit: { type: "number" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "grep",
+          arguments: {
+            pattern: "TODO",
+            path: "src",
+            glob: "*.tsx",
+            caseInsensitive: true,
+            literal: true,
+            context: 2,
+            headLimit: 10
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("grep");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      pattern: "TODO",
+      path: "src",
+      glob: "*.tsx",
+      ignoreCase: true,
+      literal: true,
+      context: 2,
+      limit: 10
+    });
+  });
+
+  it("maps SDK edit arguments to pi edit schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "edit",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+              oldText: { type: "string" },
+              newText: { type: "string" }
+            },
+            required: ["path", "oldText", "newText"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "edit",
+          arguments: {
+            path: "src/App.tsx",
+            oldString: "return null",
+            newString: "return <main />"
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("edit");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      path: "src/App.tsx",
+      oldText: "return null",
+      newText: "return <main />"
+    });
+  });
+
+  it("maps the full pi built-in tool schema matrix", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            properties: { command: { type: "string" }, timeout: { type: "number", description: "Timeout in seconds (optional, no default timeout)" } },
+            required: ["command"]
+          }
+        },
+        {
+          name: "read",
+          parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["path"] }
+        },
+        {
+          name: "write",
+          parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }
+        },
+        {
+          name: "edit",
+          parameters: { type: "object", properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, required: ["path", "oldText", "newText"] }
+        },
+        {
+          name: "find",
+          parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, limit: { type: "number" } }, required: ["pattern"] }
+        },
+        {
+          name: "grep",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" },
+              glob: { type: "string" },
+              ignoreCase: { type: "boolean" },
+              literal: { type: "boolean" },
+              context: { type: "number" },
+              limit: { type: "number" }
+            },
+            required: ["pattern"]
+          }
+        },
+        { name: "ls", parameters: { type: "object", properties: { path: { type: "string" }, limit: { type: "number" } } } }
+      ],
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm test", timeout: 120_000 } },
+        { name: "read", arguments: { path: "src/App.tsx", offset: 5, limit: 20 } },
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "src" } },
+        { name: "grep", arguments: { pattern: "TODO", path: "src", glob: "*.tsx", caseInsensitive: true, literal: true, context: 2, headLimit: 10 } },
+        { name: "ls", arguments: { path: "src", limit: 50 } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["bash", "read", "write", "edit", "find", "grep", "ls"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { command: "npm test", timeout: 120 },
+      { path: "src/App.tsx", offset: 5, limit: 20 },
+      { path: "src/App.tsx", content: "export default function App() { return null }" },
+      { path: "src/App.tsx", oldText: "return null", newText: "return <main />" },
+      { pattern: "**/*.tsx", path: "src" },
+      { pattern: "TODO", path: "src", glob: "*.tsx", ignoreCase: true, literal: true, context: 2, limit: 10 },
+      { path: "src", limit: 50 }
+    ]);
+  });
+
+  it("uses OpenCode working directory to normalize SDK file and glob calls to real OpenCode schemas", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Environment:",
+              "  Working directory: /tmp/project",
+              "  Workspace root folder: /tmp/project"
+            ].join("\n")
+          },
+          { role: "user", content: "build a todo app in vite 8 and react" }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "write",
+              description: "Writes a file to the local filesystem.",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  content: { type: "string", description: "The content to write to the file" },
+                  filePath: { type: "string", description: "The absolute path to the file to write (must be absolute, not relative)" }
+                },
+                required: ["content", "filePath"]
+              }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "read",
+              description: "Read a file or directory from the local filesystem.",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  filePath: { type: "string", description: "The absolute path to the file or directory to read" }
+                },
+                required: ["filePath"]
+              }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "edit",
+              description: "Performs exact string replacements in files.",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  filePath: { type: "string", description: "The absolute path to the file to modify" },
+                  oldString: { type: "string" },
+                  newString: { type: "string" }
+                },
+                required: ["filePath", "oldString", "newString"]
+              }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "glob",
+              description: "Fast file pattern matching tool.",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  pattern: { type: "string", description: "The glob pattern to match files against" },
+                  path: { type: "string", description: "The directory to search in" }
+                },
+                required: ["pattern"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.toolContext).toEqual({ workingDirectory: "/tmp/project" });
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      context: prepared.toolContext,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "read", arguments: { path: "src/App.tsx" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "glob", arguments: { targeting: "src/**", glob_pattern: "*.tsx" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["write", "read", "edit", "glob"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { content: "export default function App() { return null }", filePath: "/tmp/project/src/App.tsx" },
+      { filePath: "/tmp/project/src/App.tsx" },
+      { filePath: "/tmp/project/src/App.tsx", oldString: "return null", newString: "return <main />" },
+      { pattern: "**/*.tsx", path: "/tmp/project/src" }
+    ]);
+  });
+
+  it("expands home-relative SDK paths for absolute OpenCode file schemas", () => {
+    const tools = [
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to write" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_home_path",
+      tools,
+      context: { workingDirectory: "/Users/example/project" },
+      toolCalls: [
+        { name: "write", arguments: { path: "~/Desktop/rain-in-spain.html", fileText: "<main>Rain</main>" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { filePath: "/Users/example/Desktop/rain-in-spain.html", content: "<main>Rain</main>" }
+    ]);
+  });
+
+  it("maps the live OpenCode build tool matrix including unique client tools", () => {
+    const openCodeBuildTools = [
+      {
+        name: "bash",
+        parameters: {
+          type: "object",
+          properties: {
+            command: { type: "string" },
+            timeout: { type: "integer" },
+            workdir: { type: "string" },
+            description: { type: "string" }
+          },
+          required: ["command", "description"]
+        }
+      },
+      {
+        name: "edit",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to modify" },
+            oldString: { type: "string" },
+            newString: { type: "string" },
+            replaceAll: { type: "boolean" }
+          },
+          required: ["filePath", "oldString", "newString"]
+        }
+      },
+      {
+        name: "glob",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string" },
+            path: { type: "string", description: "The directory to search in" }
+          },
+          required: ["pattern"]
+        }
+      },
+      {
+        name: "grep",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string" },
+            path: { type: "string" },
+            include: { type: "string" }
+          },
+          required: ["pattern"]
+        }
+      },
+      {
+        name: "read",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file or directory to read" },
+            offset: { type: "integer" },
+            limit: { type: "integer" }
+          },
+          required: ["filePath"]
+        }
+      },
+      {
+        name: "skill",
+        parameters: {
+          type: "object",
+          properties: { name: { type: "string" } },
+          required: ["name"]
+        }
+      },
+      {
+        name: "task",
+        parameters: {
+          type: "object",
+          properties: {
+            description: { type: "string" },
+            prompt: { type: "string" },
+            subagent_type: { type: "string" },
+            task_id: { type: "string" },
+            command: { type: "string" }
+          },
+          required: ["description", "prompt", "subagent_type"]
+        }
+      },
+      {
+        name: "todowrite",
+        parameters: {
+          type: "object",
+          properties: {
+            todos: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  content: { type: "string" },
+                  status: { type: "string" },
+                  priority: { type: "string" }
+                },
+                required: ["content", "status", "priority"]
+              }
+            }
+          },
+          required: ["todos"]
+        }
+      },
+      {
+        name: "webfetch",
+        parameters: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            format: { anyOf: [{ type: "string", enum: ["text", "markdown", "html"] }, { type: "null" }] },
+            timeout: { type: "number" }
+          },
+          required: ["url"]
+        }
+      },
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            filePath: { type: "string", description: "The absolute path to the file to write (must be absolute, not relative)" }
+          },
+          required: ["content", "filePath"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: openCodeBuildTools,
+      context: { workingDirectory: "/tmp/project" },
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm test", timeout: 120_000, workingDirectory: "/tmp/project" } },
+        { name: "read", arguments: { path: "src/App.tsx", offset: 5, limit: 20 } },
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />", replaceAll: true } },
+        { name: "glob", arguments: { targetDirectory: "src", globPattern: "**/*.tsx" } },
+        { name: "grep", arguments: { pattern: "TODO", path: "src", glob: "*.tsx" } },
+        { name: "todowrite", arguments: { todos: [{ content: "Build app", status: "in_progress", priority: "high" }] } },
+        { name: "delete", arguments: { path: "src/old.tsx" } },
+        { name: "ls", arguments: { path: "src" } },
+        { name: "semsearch", arguments: { query: "submit button", targetDirectories: ["src"] } },
+        { name: "mcp", arguments: { providerIdentifier: "client", toolName: "webfetch", args: { url: "https://example.com", format: "markdown", timeout: 10 } } },
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "client",
+            toolName: "task",
+            args: { description: "Inspect app", prompt: "Find the app entry point", subagent_type: "explore", command: "inspect" }
+          }
+        },
+        { name: "mcp", arguments: { providerIdentifier: "client", toolName: "skill", args: { name: "customize-opencode" } } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual([
+      "bash",
+      "read",
+      "write",
+      "edit",
+      "glob",
+      "grep",
+      "todowrite",
+      "bash",
+      "glob",
+      "bash",
+      "webfetch",
+      "task",
+      "skill"
+    ]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { command: "npm test", timeout: 120_000, workdir: "/tmp/project", description: "Runs npm test" },
+      { filePath: "/tmp/project/src/App.tsx", offset: 5, limit: 20 },
+      { filePath: "/tmp/project/src/App.tsx", content: "export default function App() { return null }" },
+      { filePath: "/tmp/project/src/App.tsx", oldString: "return null", newString: "return <main />", replaceAll: true },
+      { pattern: "**/*.tsx", path: "/tmp/project/src" },
+      { pattern: "TODO", path: "src", include: "*.tsx" },
+      { todos: [{ content: "Build app", status: "in_progress", priority: "high" }] },
+      { command: "rm -rf 'src/old.tsx'", description: "Runs rm -rf 'src/old.tsx'" },
+      { pattern: "*", path: "src" },
+      { command: "rg --line-number --color never --hidden 'submit button' 'src'", description: "Runs rg --line-number --color never --hidden" },
+      { url: "https://example.com", format: "markdown", timeout: 10 },
+      { description: "Inspect app", prompt: "Find the app entry point", subagent_type: "explore", command: "inspect" },
+      { name: "customize-opencode" }
+    ]);
+  });
+
+  it("maps a Vite React app-build flow through strict OpenCode schemas", () => {
+    const tools = [
+      {
+        name: "bash",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            command: { type: "string" },
+            cwd: { type: "string" },
+            timeout_ms: { type: "number" },
+            description: { type: "string" }
+          },
+          required: ["command", "cwd", "timeout_ms", "description"]
+        }
+      },
+      {
+        name: "glob",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pattern: { type: "string" },
+            path: { type: "string" }
+          },
+          required: ["pattern", "path"]
+        }
+      },
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to write" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      },
+      {
+        name: "edit",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to modify" },
+            oldString: { type: "string" },
+            newString: { type: "string" }
+          },
+          required: ["filePath", "oldString", "newString"]
+        }
+      }
+    ];
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "system", content: "Working directory: /tmp/todo-vite" },
+          { role: "user", content: "build a todo app in vite 8 and react" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["bash", "glob", "write", "edit"]);
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+    const generated = toOpenAiToolCalls({
+      responseId: "chatcmpl_vite_flow",
+      tools: prepared.tools,
+      context: prepared.toolContext,
+      toolCalls: [
+        { name: "glob", arguments: { targetDirectory: "." } },
+        { name: "shell", arguments: { command: "npm create vite@latest . -- --template react", workingDirectory: "/workspace" } },
+        { name: "write", arguments: { path: "src/App.jsx", fileText: "export default function App() { return <main>Todos</main> }" } },
+        { name: "edit", arguments: { path: "package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" } },
+        { name: "shell", arguments: { command: "npm install && npm run build", timeout: 120_000 } }
+      ]
+    });
+
+    expect(generated.map((call) => call.function.name)).toEqual(["glob", "bash", "write", "edit", "bash"]);
+    expect(generated.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { pattern: "**/*", path: "/tmp/todo-vite" },
+      { command: "npm create vite@latest . -- --template react", cwd: ".", timeout_ms: 120_000, description: "Runs npm create vite@latest . --" },
+      { filePath: "/tmp/todo-vite/src/App.jsx", content: "export default function App() { return <main>Todos</main> }" },
+      { filePath: "/tmp/todo-vite/package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" },
+      { command: "npm install && npm run build", cwd: ".", timeout_ms: 120_000, description: "Runs npm install && npm run" }
+    ]);
+
+    const continued = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "system", content: "Working directory: /tmp/todo-vite" },
+          { role: "user", content: "build a todo app in vite 8 and react" },
+          { role: "assistant", content: null, tool_calls: generated },
+          { role: "tool", tool_call_id: generated[0].id, content: "{\"files\":[]}" },
+          { role: "tool", tool_call_id: generated[1].id, content: "{\"exitCode\":0,\"stdout\":\"created\",\"stderr\":\"\"}" },
+          { role: "tool", tool_call_id: generated[2].id, content: "{\"content\":\"ok\"}" },
+          { role: "tool", tool_call_id: generated[3].id, content: "{\"diff\":\"ok\"}" },
+          { role: "tool", tool_call_id: generated[4].id, content: "{\"exitCode\":0,\"stdout\":\"built\",\"stderr\":\"\"}" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+    const feedback = continued.prompt.text
+      .split("\n")
+      .filter((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "))
+      .map((line) => JSON.parse(line.slice("LOCAL OPENCODE TOOL RESULT: ".length)));
+
+    expect(feedback.map((item) => item.name)).toEqual(["glob", "shell", "write", "edit", "shell"]);
+    expect(feedback.map((item) => item.args)).toEqual([
+      { targetDirectory: "." },
+      { command: "npm create vite@latest . -- --template react", workingDirectory: "/workspace" },
+      { path: "src/App.jsx", fileText: "export default function App() { return <main>Todos</main> }" },
+      { path: "package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" },
+      { command: "npm install && npm run build", timeout: 120_000 }
+    ]);
+  });
+
+  it("keeps direct chat tools on direct tool-call syntax", () => {
+    const prepared = prepareChatRequest(
+      {
+        model: "composer-2.5",
+        messages: [{ role: "user", content: "Use the webfetch tool to fetch https://example.com" }],
+        tool_choice: { type: "function", function: { name: "webfetch" } },
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "webfetch",
+              description: "Fetch a URL",
+              parameters: {
+                type: "object",
+                properties: {
+                  url: { type: "string" },
+                  format: { type: "string" }
+                },
+                required: ["url"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["webfetch"]);
+    expect(prepared.prompt.text).not.toContain("CLIENT TOOL INVENTORY:");
+    expect(prepared.prompt.text).not.toContain("sdk_mcp");
+    expect(prepared.prompt.text).toContain("Call the exact provided tool name");
+  });
+
+  it("registers single-word non-builtin client tools without synthetic MCP targets", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "Use the webfetch tool to fetch https://example.com" }],
+        tool_choice: { type: "function", function: { name: "webfetch" } },
+        tools: [
+          {
+            name: "webfetch",
+            description: "Fetch a URL",
+            input_schema: {
+              type: "object",
+              properties: {
+                url: { type: "string" },
+                format: { type: "string" }
+              },
+              required: ["url"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["webfetch"]);
+    expect(prepared.prompt.text).not.toContain("sdk_mcp");
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+  });
+
+  it("accepts server tool schemas and skips nameless built-in response tools", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: "search the repo",
+        tools: [
+          { type: "web_search_preview" },
+          {
+            type: "server_tool",
+            name: "repo_search",
+            description: "Search repository symbols",
+            inputSchema: {
+              type: "object",
+              properties: {
+                query: { type: "string" }
+              },
+              required: ["query"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.tools).toEqual([
+      {
+        name: "repo_search",
+        description: "Search repository symbols",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" }
+          },
+          required: ["query"]
+        }
+      }
+    ]);
+    expect(prepared.prompt.text).not.toContain("LOCAL TOOL INVENTORY:");
+    expect(prepared.responseMetadata.tools).toEqual([
+      {
+        type: "function",
+        name: "repo_search",
+        description: "Search repository symbols",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" }
+          },
+          required: ["query"]
+        }
+      }
+    ]);
+  });
+
+  it("supports Codex Code Mode tools from Responses additional_tools items", () => {
+    const input = [
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [
+          {
+            type: "namespace",
+            name: "functions",
+            tools: [
+              {
+                type: "custom",
+                name: "exec",
+                description: "Run JavaScript with nested tools including tools.shell_command.",
+                format: { type: "grammar", syntax: "lark", definition: "start: /[\\s\\S]+/" }
+              },
+              {
+                type: "function",
+                name: "wait",
+                parameters: {
+                  type: "object",
+                  properties: { cell_id: { type: "string" } },
+                  required: ["cell_id"]
+                }
+              }
+            ]
+          },
+          {
+            type: "namespace",
+            name: "collaboration",
+            tools: [{ type: "function", name: "spawn_agent", parameters: { type: "object" } }]
+          }
+        ]
+      },
+      { role: "user", content: [{ type: "input_text", text: "分析当前项目" }] }
+    ];
+    const prepared = prepareResponsesRequest({ model: "gpt-5.6-sol", input }, { id: "gpt-5.6-sol" });
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["exec", "wait"]);
+    expect(prepared.prompt.mode).toBe("agent");
+    expect(prepared.prompt.text).not.toContain("CODEX CODE MODE:");
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+    expect(prepared.prompt.text).not.toContain("DEVELOPER: [empty]");
+
+    const [toolCall] = toOpenAiToolCalls({
+      responseId: "resp_code_mode",
+      tools: prepared.tools,
+      toolCalls: [{
+        name: "exec",
+        arguments: {
+          code: 'const r = await tools.shell_command({"command":"Get-ChildItem -Name"}); text(r);'
+        }
+      }]
+    });
+    const response = responseObject({
+      id: "resp_code_mode",
+      created: 1,
+      model: "gpt-5.6-sol",
+      text: "",
+      toolCalls: [toolCall],
+      promptChars: 100
+    });
+
+    expect(response.output).toEqual([
+      expect.objectContaining({
+        type: "custom_tool_call",
+        name: "exec",
+        call_id: toolCall.id,
+        input: 'const r = await tools.shell_command({"command":"Get-ChildItem -Name"}); text(r);'
+      })
+    ]);
+  });
+
+  it("does not infer a Responses tool requirement from quoted names after a custom tool result", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "gpt-5.6-sol",
+        input: [
+          {
+            type: "additional_tools",
+            role: "developer",
+            tools: [{
+              type: "namespace",
+              name: "functions",
+              tools: [
+                { type: "custom", name: "exec", description: "Run JavaScript with nested tools." },
+                {
+                  type: "function",
+                  name: "memory_get",
+                  description: "Read a memory entry.",
+                  parameters: {
+                    type: "object",
+                    properties: { path: { type: "string" } },
+                    required: ["path"]
+                  }
+                }
+              ]
+            }]
+          },
+          {
+            role: "user",
+            content: [{
+              type: "input_text",
+              text: "看看当前项目代码。Conversation context: 上一条消息提到了 memory_get。"
+            }]
+          },
+          {
+            type: "custom_tool_call",
+            call_id: "call_exec",
+            name: "exec",
+            input: 'const r = await tools.shell_command({"command":"rg --files"}); text(r);'
+          },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_exec",
+            output: [{ type: "input_text", text: "build.gradle.kts\nREADME.md" }]
+          }
+        ]
+      },
+      { id: "gpt-5.6-sol" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["exec", "memory_get"]);
+    expect(prepared.prompt.text).toContain("build.gradle.kts");
+    expect(prepared.prompt.text).toContain("memory_get");
+    expect(prepared.prompt.text).not.toContain("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST:");
+    expect(prepared.prompt.text).not.toContain("Emit exactly one");
+    expect(prepared.prompt.text).not.toContain("Call the registered client tool memory_get directly");
+  });
+
+  it("keeps only follow-up content, images and output constraints in incremental prompts", () => {
+    const followUp = [{ role: "user", content: [
+      { type: "input_text", text: "NEW_USER_INPUT" },
+      { type: "input_image", image_url: "data:image/png;base64,AQID" }
+    ] }];
+    const prompt = prepareResponsesFollowUpPrompt({
+      model: "cursor-grok", instructions: "STABLE_INSTRUCTIONS".repeat(1000),
+      input: [{ type: "additional_tools", tools: [{ type: "function", name: "read", parameters: { type: "object" } }] }],
+      max_output_tokens: 200
+    }, { id: "cursor-grok" }, followUp)!;
+    expect(prompt.text).toMatch(/^INPUT:\nUSER: NEW_USER_INPUT\n\[image\]/);
+    expect(prompt.text).not.toContain("STABLE_INSTRUCTIONS");
+    expect(prompt.text).not.toContain("You are serving");
+    expect(prompt.text).toContain("Keep the answer within about 200 output tokens.");
+    expect(prompt.images).toEqual([{ mimeType: "image/png", data: "AQID" }]);
+  });
+
+  it("converts Responses input arrays", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        instructions: "Use JSON.",
+        input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        text: { format: { type: "json_object" } }
+      },
+      { id: "composer-2.5" }
+    );
+    expect(prepared.prompt.text).toContain("INSTRUCTIONS:");
+    expect(prepared.prompt.text).toContain("USER: hello");
+    expect(prepared.prompt.text).toContain("valid JSON object");
+    expect(prepared.trajectoryUserInputs).toEqual(["hello"]);
+  });
+
+  it("records canonical Responses transcript items at their rendered prompt offsets", () => {
+    const prepared = prepareResponsesRequest({
+      model: "composer-2.5",
+      instructions: "Keep the bootstrap stable.",
+      input: [
+        { type: "message", id: "msg_transport", status: "completed", role: "user", content: "inspect" },
+        { type: "reasoning", summary: [] },
+        { type: "function_call", id: "fc_transport", call_id: "call_read", name: "read", arguments: "{\"path\":\"README.md\"}" },
+        { type: "function_call_output", call_id: "call_read", output: "contents" },
+        { type: "message", role: "assistant", content: "done" }
+      ],
+      max_output_tokens: 200
+    }, { id: "composer-2.5" });
+
+    const context = prepared.agentContext;
+    expect(context?.bootstrap).toMatch(/INSTRUCTIONS:\nKeep the bootstrap stable\.\n\nINPUT:\n$/);
+    expect(context?.transcriptItems.map((item) => item.value)).toEqual([
+      { type: "message", role: "user", text: "inspect", imageCount: 0 },
+      { type: "tool_call", callId: "call_read", name: "read", arguments: { path: "README.md" } },
+      { type: "tool_output", callId: "call_read", output: "contents", imageCount: 0, isError: false },
+      { type: "message", role: "assistant", text: "done", imageCount: 0 }
+    ]);
+    expect(prepared.trajectoryUserInputs).toEqual([]);
+    expect(context?.transcriptItems.map((item, index, items) => prepared.prompt.text.slice(
+      item.offset,
+      index + 1 < items.length ? items[index + 1].offset - 1 : context.transcriptEndOffset
+    ))).toEqual([
+      "USER: inspect",
+      'ASSISTANT TOOL_CALLS: [{"id":"call_read","type":"function","function":{"name":"read","arguments":"{\\\"path\\\":\\\"README.md\\\"}"}}]',
+      expect.stringContaining("TOOL RESULT (name=read tool_call_id=call_read): contents"),
+      "ASSISTANT: done"
+    ]);
+    expect(prepared.prompt.text.slice(context?.transcriptEndOffset)).toContain("OUTPUT CONSTRAINTS:");
+    expect(context?.promptTextChars).toBe(prepared.prompt.text.length);
+  });
+
+  it("rejects a non-object reasoning configuration", () => {
+    expect(() => prepareResponsesRequest({
+      model: "cursor-grok",
+      input: "Inspect the repository",
+      reasoning: "detailed"
+    }, { id: "cursor-grok" })).toThrowError(expect.objectContaining({
+      status: 400,
+      code: "invalid_request_error",
+      param: "reasoning"
+    }));
+  });
+
+  it("rejects unknown reasoning summary values", () => {
+    expect(() => prepareResponsesRequest({
+      model: "cursor-grok",
+      input: "Inspect the repository",
+      reasoning: { summary: "verbose" }
+    }, { id: "cursor-grok" })).toThrowError(expect.objectContaining({
+      status: 400,
+      code: "unsupported_value",
+      param: "reasoning.summary"
+    }));
+  });
+
+  it("drops portable reasoning history from fresh-Agent prompt reconstruction", () => {
+    const prepared = prepareResponsesRequest({
+      model: "cursor-grok",
+      input: [
+        { type: "message", role: "user", content: "Inspect the repository" },
+        {
+          type: "reasoning",
+          id: "rs_previous",
+          summary: [{ type: "summary_text", text: "Private prior trace" }],
+          encrypted_content: null
+        },
+        { type: "message", role: "assistant", content: "I found the entry point." }
+      ]
+    }, { id: "cursor-grok" });
+
+    expect(prepared.prompt.text).not.toContain("Private prior trace");
+    expect(prepared.responseInputItems).not.toContainEqual(expect.objectContaining({ type: "reasoning" }));
+    expect(prepared.prompt.text).toContain("I found the entry point.");
+  });
+
+  it("rejects non-empty encrypted reasoning before starting a Responses run", () => {
+    expect(() => prepareResponsesRequest({
+      model: "cursor-grok",
+      stream: true,
+      input: [{
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Prior trace" }],
+        encrypted_content: "opaque-provider-state"
+      }]
+    }, { id: "cursor-grok" })).toThrowError(expect.objectContaining({
+      status: 400,
+      code: "invalid_encrypted_content",
+      param: "input[0].encrypted_content"
+    }));
+  });
+
+  it("accepts Responses function tools with auto and carries function outputs into the prompt", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "build a todo app in vite 8 and react" }] },
+          { type: "function_call", call_id: "call_1", name: "glob", arguments: "{\"pattern\":\"*\"}" },
+          { type: "function_call_output", call_id: "call_1", output: "[]" }
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "glob",
+            description: "Find files",
+            parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+          }
+        ],
+        tool_choice: "auto"
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.tools).toEqual([
+      {
+        name: "glob",
+        description: "Find files",
+        parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+      }
+    ]);
+    expect(prepared.prompt.mode).toBe("agent");
+    expect(prepared.prompt.text).not.toContain("LOCAL TOOL INVENTORY:");
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+    expect(prepared.prompt.text).toContain("TOOL RESULT (name=glob tool_call_id=call_1): []");
+    expect(prepared.prompt.text).not.toContain("TOOL CHOICE:");
+    expect(prepared.responseMetadata.tools).toEqual([
+      {
+        type: "function",
+        name: "glob",
+        description: "Find files",
+        parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+      }
+    ]);
+  });
+
+  it("accepts Responses tool_choice none", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: "hello",
+        tools: [{
+          type: "function",
+          name: "glob",
+          parameters: { type: "object", properties: { pattern: { type: "string" } } }
+        }],
+        tool_choice: "none"
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.tools).toEqual([]);
+    expect(prepared.prompt.mode).toBe("ask");
+  });
+
+  it("does not advertise unsupported response storage", () => {
+    const prepared = prepareResponsesRequest(
+      { model: "composer-2.5", input: "hello" },
+      { id: "composer-2.5" }
+    );
+    expect(prepared.responseMetadata.store).toBe(false);
+
+    let caught: unknown;
+    try {
+      prepareResponsesRequest(
+        { model: "composer-2.5", input: "hello", store: true },
+        { id: "composer-2.5" }
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      status: 400,
+      code: "unsupported_parameter",
+      param: "store"
+    });
+  });
+
+  it("rejects unsupported Responses tool_choice values", () => {
+    const unsupported = [
+      "required",
+      { type: "function", name: "glob" },
+      { type: "allowed_tools", mode: "required", tools: [{ type: "function", name: "glob" }] }
+    ];
+
+    for (const toolChoice of unsupported) {
+      let caught: unknown;
+      try {
+        prepareResponsesRequest(
+          {
+            model: "composer-2.5",
+            input: "hello",
+            tools: [{ type: "function", name: "glob", parameters: { type: "object" } }],
+            tool_choice: toolChoice
+          },
+          { id: "composer-2.5" }
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toMatchObject({
+        status: 400,
+        code: "unsupported_parameter",
+        param: "tool_choice"
+      });
+    }
+  });
+
+  it.each(["read", "exec", "write", "edit", "unknown_tool"])(
+    "renders large %s results once without repeating call arguments",
+    (name) => {
+      const output = "UNIQUE_RESULT_PAYLOAD " + "large result line\n".repeat(10000);
+      const args = { path: "UNIQUE_ARGUMENT_PATH", body: "input body" };
+      const prepared = prepareResponsesRequest({
+        model: "cursor-grok",
+        input: [
+          { type: "function_call", call_id: "call_large", name, arguments: JSON.stringify(args) },
+          { type: "function_call_output", call_id: "call_large", output }
+        ],
+        tools: [{ type: "function", name, parameters: { type: "object" } }]
+      }, { id: "cursor-grok" });
+
+      expect(prepared.prompt.text.split("UNIQUE_RESULT_PAYLOAD")).toHaveLength(2);
+      expect(prepared.prompt.text.split("UNIQUE_ARGUMENT_PATH")).toHaveLength(2);
+      const context = prepared.agentContext!;
+      expect(prepared.prompt.text.slice(context.transcriptItems[1].offset, context.transcriptEndOffset))
+        .toBe(`TOOL RESULT (name=${name} tool_call_id=call_large): ${output}`);
+      expect(prepared.promptChars).toBeLessThan(output.length + 2000);
+      expect(context.transcriptItems[1].value).toEqual({
+        type: "tool_output", callId: "call_large", output, imageCount: 0, isError: false
+      });
+    }
+  );
+
+  it("preserves raw JSON, empty results and custom errors with their call identity", () => {
+    const jsonOutput = '{"exitCode":1,"stdout":"","stderr":"permission denied"}';
+    const prepared = prepareResponsesRequest({
+      model: "cursor-grok",
+      input: [
+        { type: "function_call", call_id: "call_shell", name: "bash", arguments: '{"command":"npm test","timeout":120}' },
+        { type: "function_call_output", call_id: "call_shell", output: jsonOutput },
+        { type: "custom_tool_call", call_id: "call_custom", name: "exec", input: "unique_custom_input()" },
+        { type: "custom_tool_call_output", call_id: "call_custom", output: "custom failure", is_error: true },
+        { type: "function_call_output", call_id: "call_without_history", output: "" }
+      ]
+    }, { id: "cursor-grok" });
+    const context = prepared.agentContext!;
+    const resultText = (index: number) => prepared.prompt.text.slice(
+      context.transcriptItems[index].offset,
+      index + 1 < context.transcriptItems.length ? context.transcriptItems[index + 1].offset - 1 : context.transcriptEndOffset
+    );
+    expect(resultText(1)).toBe(`TOOL RESULT (name=bash tool_call_id=call_shell): ${jsonOutput}`);
+    expect(resultText(3)).toBe("TOOL RESULT (name=exec tool_call_id=call_custom is_error=true): custom failure");
+    expect(resultText(4)).toBe("TOOL RESULT (tool_call_id=call_without_history): [empty]");
+    expect(prepared.prompt.text.split("unique_custom_input()")).toHaveLength(2);
+    expect(context.transcriptItems[3].value).toMatchObject({ isError: true, output: "custom failure" });
+  });
+
+  it("returns OpenAI-shaped response objects", () => {
+    const chat = chatCompletionResponse({
+      id: "chatcmpl_test",
+      created: 1,
+      model: "composer-2.5",
+      text: "hello",
+      promptChars: 20
+    });
+    expect(chat).toMatchObject({
+      object: "chat.completion",
+      choices: [{ message: { role: "assistant", content: "hello" } }],
+      usage: {
+        cost: {
+          estimated: true,
+          pricing: {
+            input_per_million_tokens_usd: 0.5,
+            output_per_million_tokens_usd: 2.5
+          }
+        }
+      }
+    });
+
+    const response = responseObject({
+      id: "resp_test",
+      created: 1,
+      model: "composer-2.5",
+      text: "hello",
+      promptChars: 20
+    });
+    expect(response).toMatchObject({
+      object: "response",
+      output: [{ type: "message", content: [{ type: "output_text", text: "hello" }] }],
+      usage: {
+        cost: {
+          estimated: true,
+          pricing: {
+            input_per_million_tokens_usd: 0.5,
+            output_per_million_tokens_usd: 2.5
+          }
+        }
+      }
+    });
+
+  });
+
+  it("keeps Cursor SDK cache usage out of OpenAI context accounting", () => {
+    const usage = {
+      inputTokens: 12000,
+      outputTokens: 80,
+      cacheReadTokens: 10000,
+      cacheWriteTokens: 1500,
+      totalTokens: 12080,
+      reasoningTokens: 20
+    };
+    const chat = chatCompletionResponse({
+      id: "chatcmpl_cache",
+      created: 1,
+      model: "grok-4.6[fast=true,effort=high]",
+      text: "done",
+      promptChars: 10,
+      usage
+    });
+    expect(chat).toMatchObject({
+      usage: {
+        prompt_tokens: 3,
+        completion_tokens: 80,
+        total_tokens: 83,
+        prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 20 }
+      }
+    });
+
+    const response = responseObject({
+      id: "resp_cache",
+      created: 1,
+      model: "grok-4.6[fast=true,effort=high]",
+      text: "done",
+      promptChars: 10,
+      usage
+    });
+    expect(response).toMatchObject({
+      usage: {
+        input_tokens: 3,
+        output_tokens: 80,
+        total_tokens: 83,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        output_tokens_details: { reasoning_tokens: 20 }
+      }
+    });
+  });
+
+  it("emits an OpenAI-style final usage chunk for streamed chat", () => {
+    const chunk = new TextDecoder().decode(
+      chatUsageChunk({
+        id: "chatcmpl_test",
+        created: 1,
+        model: "composer-2.5",
+        promptChars: 20,
+        completionChars: 5
+      })
+    );
+
+    expect(chunk).toContain('"choices":[]');
+    expect(chunk).toContain('"usage"');
+    expect(chunk).toContain('"total_tokens"');
+    expect(chunk).toContain('"total_usd"');
+  });
+
+  it("returns OpenAI-shaped tool call responses", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [{ name: "glob", parameters: { type: "object", properties: { pattern: { type: "string" } } } }],
+      toolCalls: [{ name: "Glob", arguments: { glob_pattern: "*" } }]
+    });
+    const chat = chatCompletionResponse({
+      id: "chatcmpl_test",
+      created: 1,
+      model: "composer-2.5",
+      text: "",
+      toolCalls,
+      promptChars: 20
+    });
+    expect(chat).toMatchObject({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"pattern\":\"*\"}" } }]
+          },
+          finish_reason: "tool_calls"
+        }
+      ]
+    });
+  });
+
+  it("normalizes Cursor-style tool names and arguments to the client schema", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "write",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["filePath", "content"]
+          }
+        },
+        {
+          name: "edit",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              oldString: { type: "string" },
+              newString: { type: "string" }
+            },
+            required: ["filePath", "oldString", "newString"]
+          }
+        },
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { command: { type: "string" } },
+            required: ["command"]
+          }
+        }
+      ],
+      toolCalls: [
+        { name: "write_file", arguments: { target_file: "index.html", new_contents: "<main>Hello</main>", extra: "drop me" } },
+        { name: "edit_file", arguments: { path: "index.html", old_string: "Hello", new_contents: "Hi" } },
+        { name: "run_terminal_cmd", arguments: { cmd: "npm test" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["write", "edit", "bash"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { filePath: "index.html", content: "<main>Hello</main>" },
+      { filePath: "index.html", oldString: "Hello", newString: "Hi" },
+      { command: "npm test" }
+    ]);
+  });
+
+  it("maps SDK calls through composed and wrapped JSON schemas", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "build the app" }],
+        tools: [
+          {
+            name: "run_command",
+            json_schema: {
+              schema: {
+                allOf: [
+                  {
+                    type: "object",
+                    properties: {
+                      shellCommand: { type: "string" }
+                    },
+                    required: ["shellCommand"]
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      workingDir: { type: "string" },
+                      timeoutSeconds: { type: "number", description: "Timeout in seconds" },
+                      description: { type: "string" }
+                    }
+                  }
+                ],
+                additionalProperties: false
+              }
+            }
+          },
+          {
+            name: "workspace_file",
+            input_schema: {
+              anyOf: [
+                {
+                  type: "object",
+                  properties: {
+                    action: { type: "string", const: "create" },
+                    target: { type: "string" },
+                    body: { type: "string" }
+                  },
+                  required: ["action", "target", "body"]
+                },
+                {
+                  type: "object",
+                  properties: {
+                    action: { type: "string", const: "replace" },
+                    target: { type: "string" },
+                    find: { type: "string" },
+                    replaceWith: { type: "string" }
+                  },
+                  required: ["action", "target", "find", "replaceWith"]
+                }
+              ],
+              additionalProperties: false
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["run_command", "workspace_file"]);
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm run build", workingDirectory: "/workspace", timeout: 120_000 } },
+        { name: "write", arguments: { path: "src/App.jsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.jsx", oldString: "return null", newString: "return <main />" } }
+      ],
+      context: { workingDirectory: "/tmp/composed-app" }
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["run_command", "workspace_file", "workspace_file"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        shellCommand: "npm run build",
+        timeoutSeconds: 120
+      },
+      {
+        action: "create",
+        target: "src/App.jsx",
+        body: "export default function App() { return null }"
+      },
+      {
+        action: "replace",
+        target: "src/App.jsx",
+        find: "return null",
+        replaceWith: "return <main />"
+      }
+    ]);
+  });
+
+  it("maps SDK calls through local JSON schema references", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "write the referenced schema file" }],
+        tools: [
+          {
+            name: "workspace_file",
+            parameters: {
+              $ref: "#/$defs/FileInput",
+              $defs: {
+                FileInput: {
+                  type: "object",
+                  properties: {
+                    operation: { $ref: "#/$defs/FileOperation" },
+                    absolutePath: { type: "string", description: "absolute path to the file" },
+                    text: { type: "string" }
+                  },
+                  required: ["operation", "absolutePath", "text"],
+                  additionalProperties: false
+                },
+                FileOperation: {
+                  type: "string",
+                  enum: ["create", "replace", "read"]
+                }
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.tools.map((tool) => tool.name)).toEqual(["workspace_file"]);
+    expect(prepared.prompt.text).not.toContain("SDK TOOL ROUTING MAP:");
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      context: { workingDirectory: "/tmp/ref-schema-app" },
+      toolCalls: [
+        {
+          name: "write",
+          arguments: {
+            path: "src/App.jsx",
+            fileText: "export default function App() { return <main>Ref</main> }"
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["workspace_file"]);
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      operation: "create",
+      absolutePath: "/tmp/ref-schema-app/src/App.jsx",
+      text: "export default function App() { return <main>Ref</main> }"
+    });
+  });
+
+  it("maps SDK calls to generic harness schemas by reusable tool shape", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "workspace_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              action: { type: "string", enum: ["read", "write", "replace", "remove"] },
+              target: { type: "string" },
+              body: { type: "string" },
+              find: { type: "string" },
+              replaceWith: { type: "string" }
+            },
+            required: ["action", "target"]
+          }
+        },
+        {
+          name: "run_command",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              shellCommand: { type: "string" },
+              dir: { type: "string" }
+            },
+            required: ["shellCommand"]
+          }
+        },
+        {
+          name: "discover_files",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              includePattern: { type: "string" },
+              dir: { type: "string" }
+            },
+            required: ["includePattern"]
+          }
+        }
+      ],
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "shell", arguments: { command: "npm test", workingDirectory: "src" } },
+        { name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "src" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["workspace_file", "workspace_file", "run_command", "discover_files"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { action: "write", target: "src/App.tsx", body: "export default function App() { return null }" },
+      { action: "replace", target: "src/App.tsx", find: "return null", replaceWith: "return <main />" },
+      { shellCommand: "npm test", dir: "src" },
+      { includePattern: "**/*.tsx", dir: "src" }
+    ]);
+  });
+
+  it("maps Cursor SDK MCP calls to OpenCode server_tool functions", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "probe_write_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              file_path: { type: "string" },
+              contents: { type: "string" },
+              overwrite: { type: "boolean" }
+            },
+            required: ["file_path", "contents"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "probe",
+            toolName: "write_file",
+            args: {
+              file_path: "src/App.tsx",
+              contents: "export default function App() { return null }",
+              overwrite: true
+            }
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("probe_write_file");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      file_path: "src/App.tsx",
+      contents: "export default function App() { return null }",
+      overwrite: true
+    });
+  });
+
+  it("maps Cursor SDK MCP calls with alternate payload envelopes", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "probe_write_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              file_path: { type: "string" },
+              contents: { type: "string" },
+              overwrite: { type: "boolean" }
+            },
+            required: ["file_path", "contents"]
+          }
+        },
+        {
+          name: "call_mcp_tool",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              serverName: { type: "string" },
+              toolName: { type: "string" },
+              input: { type: "object" }
+            },
+            required: ["serverName", "toolName", "input"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            serverName: "probe",
+            name: "write_file",
+            arguments: JSON.stringify({
+              file_path: "src/App.tsx",
+              contents: "export default function App() { return null }",
+              overwrite: true
+            })
+          }
+        },
+        {
+          name: "mcp",
+          arguments: {
+            provider: "filesystem",
+            tool: "read_file",
+            parameters: JSON.stringify({ path: "README.md" })
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["probe_write_file", "call_mcp_tool"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        file_path: "src/App.tsx",
+        contents: "export default function App() { return null }",
+        overwrite: true
+      },
+      {
+        serverName: "filesystem",
+        toolName: "read_file",
+        input: { path: "README.md" }
+      }
+    ]);
+  });
+
+  it("maps Cursor SDK MCP calls to single-word client tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "webfetch",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              url: { type: "string" },
+              format: { type: "string" }
+            },
+            required: ["url"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "client",
+            toolName: "webfetch",
+            args: {
+              url: "https://example.com",
+              format: "markdown"
+            }
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("webfetch");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      url: "https://example.com",
+      format: "markdown"
+    });
+  });
+
+  it("maps Cursor SDK MCP calls to wrapped single-word client tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "task",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              input: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  description: { type: "string" },
+                  prompt: { type: "string" },
+                  subagent_type: { type: "string" }
+                },
+                required: ["description", "prompt", "subagent_type"]
+              }
+            },
+            required: ["input"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "client",
+            toolName: "task",
+            args: {
+              description: "Explore files",
+              prompt: "Find the app entrypoint",
+              subagent_type: "explore"
+            }
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("task");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      input: {
+        description: "Explore files",
+        prompt: "Find the app entrypoint",
+        subagent_type: "explore"
+      }
+    });
+  });
+
+  it("feeds OpenCode server tool results back as completed SDK MCP calls", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "Use the filesystem write_file MCP tool." },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_mcp",
+                type: "function",
+                function: {
+                  name: "mcp__filesystem__write_file",
+                  arguments: JSON.stringify({
+                    file_path: "src/App.tsx",
+                    contents: "export default function App() { return null }"
+                  })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_mcp", name: "mcp__filesystem__write_file", content: "{\"content\":\"ok\"}" }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "mcp__filesystem__write_file",
+              parameters: {
+                type: "object",
+                properties: {
+                  file_path: { type: "string" },
+                  contents: { type: "string" }
+                },
+                required: ["file_path", "contents"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("mcp");
+    expect(feedback.args).toEqual({
+      providerIdentifier: "filesystem",
+      toolName: "write_file",
+      args: {
+        file_path: "src/App.tsx",
+        contents: "export default function App() { return null }"
+      }
+    });
+    expect(feedback.result).toEqual({ status: "success", value: { content: "ok" } });
+  });
+
+  it("feeds single-word client tool results back as completed synthetic SDK MCP calls", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "Use the webfetch tool." },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_webfetch",
+                type: "function",
+                function: {
+                  name: "webfetch",
+                  arguments: JSON.stringify({ url: "https://example.com", format: "markdown" })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_webfetch", name: "webfetch", content: "{\"content\":\"ok\"}" }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "webfetch",
+              parameters: {
+                type: "object",
+                properties: {
+                  url: { type: "string" },
+                  format: { type: "string" }
+                },
+                required: ["url"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("mcp");
+    expect(feedback.args).toEqual({
+      providerIdentifier: "client",
+      toolName: "webfetch",
+      args: {
+        url: "https://example.com",
+        format: "markdown"
+      }
+    });
+    expect(feedback.result).toEqual({ status: "success", value: { content: "ok" } });
+  });
+
+  it("feeds live OpenCode build tool results back with SDK-compatible names and arguments", () => {
+    const fileText = "export default function App() { return null }";
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "build a todo app" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call_write", type: "function", function: { name: "write", arguments: JSON.stringify({ filePath: "/tmp/project/src/App.tsx", content: fileText }) } },
+              { id: "call_read", type: "function", function: { name: "read", arguments: JSON.stringify({ filePath: "/tmp/project/src/App.tsx", offset: 5, limit: 20 }) } },
+              { id: "call_edit", type: "function", function: { name: "edit", arguments: JSON.stringify({ filePath: "/tmp/project/src/App.tsx", oldString: "return null", newString: "return <main />" }) } },
+              { id: "call_glob", type: "function", function: { name: "glob", arguments: JSON.stringify({ pattern: "**/*.tsx", path: "/tmp/project/src" }) } },
+              { id: "call_todo", type: "function", function: { name: "todowrite", arguments: JSON.stringify({ todos: [{ content: "Build app", status: "in_progress", priority: "high" }] }) } },
+              { id: "call_task", type: "function", function: { name: "task", arguments: JSON.stringify({ description: "Inspect app", prompt: "Find the app entry point", subagent_type: "explore" }) } },
+              { id: "call_skill", type: "function", function: { name: "skill", arguments: JSON.stringify({ name: "customize-opencode" }) } }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_write", content: "{\"content\":\"ok\"}" },
+          { role: "tool", tool_call_id: "call_read", content: fileText },
+          { role: "tool", tool_call_id: "call_edit", content: "{\"diff\":\"updated App\"}" },
+          { role: "tool", tool_call_id: "call_glob", content: "{\"files\":[\"src/App.tsx\"]}" },
+          { role: "tool", tool_call_id: "call_todo", content: "{\"content\":\"ok\"}" },
+          { role: "tool", tool_call_id: "call_task", content: "{\"content\":\"entry point is src/App.tsx\"}" },
+          { role: "tool", tool_call_id: "call_skill", content: "{\"content\":\"loaded\"}" }
+        ],
+        tools: [
+          {
+            name: "write",
+            input_schema: { type: "object", properties: { filePath: { type: "string" }, content: { type: "string" } }, required: ["filePath", "content"] }
+          },
+          {
+            name: "read",
+            input_schema: { type: "object", properties: { filePath: { type: "string" }, offset: { type: "integer" }, limit: { type: "integer" } }, required: ["filePath"] }
+          },
+          {
+            name: "edit",
+            input_schema: { type: "object", properties: { filePath: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" } }, required: ["filePath", "oldString", "newString"] }
+          },
+          {
+            name: "glob",
+            input_schema: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] }
+          },
+          {
+            name: "todowrite",
+            input_schema: { type: "object", properties: { todos: { type: "array" } }, required: ["todos"] }
+          },
+          {
+            name: "task",
+            input_schema: {
+              type: "object",
+              properties: { description: { type: "string" }, prompt: { type: "string" }, subagent_type: { type: "string" } },
+              required: ["description", "prompt", "subagent_type"]
+            }
+          },
+          {
+            name: "skill",
+            input_schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const feedback = prepared.prompt.text
+      .split("\n")
+      .filter((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "))
+      .map((line) => JSON.parse(line.slice("LOCAL OPENCODE TOOL RESULT: ".length)));
+
+    expect(feedback.map((item) => item.name)).toEqual(["write", "read", "edit", "glob", "todowrite", "mcp", "mcp"]);
+    expect(feedback.map((item) => item.args)).toEqual([
+      { path: "/tmp/project/src/App.tsx", fileText },
+      { path: "/tmp/project/src/App.tsx", offset: 5, limit: 20 },
+      { path: "/tmp/project/src/App.tsx", oldString: "return null", newString: "return <main />" },
+      { targetDirectory: "/tmp/project/src", globPattern: "**/*.tsx" },
+      { todos: [{ content: "Build app", status: "in_progress", priority: "high" }] },
+      { providerIdentifier: "client", toolName: "task", args: { description: "Inspect app", prompt: "Find the app entry point", subagent_type: "explore" } },
+      { providerIdentifier: "client", toolName: "skill", args: { name: "customize-opencode" } }
+    ]);
+    expect(feedback[0].result.value).toMatchObject({ path: "/tmp/project/src/App.tsx", linesCreated: 1 });
+    expect(feedback[3].result.value).toMatchObject({ files: ["src/App.tsx"], totalFiles: 1 });
+  });
+
+  it("feeds generic harness tool results back with SDK builtin names from generated call ids", () => {
+    const fileText = "export default function App() { return null }";
+    const tools = [
+      {
+        name: "workspace_file",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", enum: ["read", "write", "replace", "remove"] },
+            target: { type: "string" },
+            body: { type: "string" },
+            find: { type: "string" },
+            replaceWith: { type: "string" }
+          },
+          required: ["action", "target"]
+        }
+      },
+      {
+        name: "run_command",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            shellCommand: { type: "string" },
+            dir: { type: "string" }
+          },
+          required: ["shellCommand"]
+        }
+      },
+      {
+        name: "discover_files",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            includePattern: { type: "string" },
+            dir: { type: "string" }
+          },
+          required: ["includePattern"]
+        }
+      }
+    ];
+    const generated = toOpenAiToolCalls({
+      responseId: "chatcmpl_generic",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "shell", arguments: { command: "npm test", workingDirectory: "src" } },
+        { name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "src" } }
+      ]
+    });
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "build a todo app" },
+          { role: "assistant", content: null, tool_calls: generated },
+          { role: "tool", tool_call_id: generated[0].id, content: "{\"content\":\"ok\"}" },
+          { role: "tool", tool_call_id: generated[1].id, content: "{\"diff\":\"updated\"}" },
+          { role: "tool", tool_call_id: generated[2].id, content: "{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}" },
+          { role: "tool", tool_call_id: generated[3].id, content: "{\"files\":[\"src/App.tsx\"]}" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const feedback = prepared.prompt.text
+      .split("\n")
+      .filter((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "))
+      .map((line) => JSON.parse(line.slice("LOCAL OPENCODE TOOL RESULT: ".length)));
+
+    expect(feedback.map((item) => item.name)).toEqual(["write", "edit", "shell", "glob"]);
+    expect(feedback.map((item) => item.args)).toEqual([
+      { path: "src/App.tsx", fileText },
+      { path: "src/App.tsx", oldString: "return null", newString: "return <main />" },
+      { command: "npm test", workingDirectory: "src" },
+      { targetDirectory: "src", globPattern: "**/*.tsx" }
+    ]);
+    expect(feedback[0].result.value).toMatchObject({ path: "src/App.tsx", linesCreated: 1 });
+    expect(feedback[2].result.value).toMatchObject({ exitCode: 0, stdout: "ok", stderr: "" });
+    expect(feedback[3].result.value.files).toEqual(["src/App.tsx"]);
+  });
+
+  it("feeds find client tool results back as completed SDK glob calls", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "find source files" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_find",
+                type: "function",
+                function: {
+                  name: "find",
+                  arguments: JSON.stringify({ pattern: "**/*.tsx", path: "src" })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_find", content: "{\"files\":[\"src/App.tsx\"]}" }
+        ],
+        tools: [
+          {
+            name: "find",
+            input_schema: {
+              type: "object",
+              properties: {
+                pattern: { type: "string" },
+                path: { type: "string" }
+              },
+              required: ["pattern"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("glob");
+    expect(feedback.args).toEqual({ targetDirectory: "src", globPattern: "**/*.tsx" });
+    expect(feedback.result.value.files).toEqual(["src/App.tsx"]);
+    expect(feedback.result.value.totalFiles).toBe(1);
+  });
+
+  it("feeds pi bash results back with SDK millisecond timeout arguments", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "run tests" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_bash",
+                type: "function",
+                function: {
+                  name: "bash",
+                  arguments: JSON.stringify({ command: "npm test", timeout: 120 })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_bash", content: "{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}" }
+        ],
+        tools: [
+          {
+            name: "bash",
+            input_schema: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                timeout: { type: "number", description: "Timeout in seconds (optional, no default timeout)" }
+              },
+              required: ["command"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("shell");
+    expect(feedback.args).toEqual({ command: "npm test", timeout: 120_000 });
+    expect(feedback.result.value).toMatchObject({ exitCode: 0, stdout: "ok", stderr: "" });
+  });
+
+  it("feeds pi edit results back with SDK edit argument names", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "edit the app" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_edit",
+                type: "function",
+                function: {
+                  name: "edit",
+                  arguments: JSON.stringify({ path: "src/App.tsx", oldText: "return null", newText: "return <main />" })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_edit", content: "{\"diff\":\"ok\"}" }
+        ],
+        tools: [
+          {
+            name: "edit",
+            input_schema: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                oldText: { type: "string" },
+                newText: { type: "string" }
+              },
+              required: ["path", "oldText", "newText"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("edit");
+    expect(feedback.args).toEqual({
+      path: "src/App.tsx",
+      oldString: "return null",
+      newString: "return <main />"
+    });
+    expect(feedback.result.value.diffString).toBe("ok");
+  });
+
+  it("feeds pi grep results back with SDK grep option names", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "search source files" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_grep",
+                type: "function",
+                function: {
+                  name: "grep",
+                  arguments: JSON.stringify({
+                    pattern: "TODO",
+                    path: "src",
+                    glob: "*.tsx",
+                    ignoreCase: true,
+                    literal: true,
+                    context: 2,
+                    limit: 10
+                  })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_grep", content: "src/App.tsx:1:TODO" }
+        ],
+        tools: [
+          {
+            name: "grep",
+            input_schema: {
+              type: "object",
+              properties: {
+                pattern: { type: "string" },
+                path: { type: "string" },
+                glob: { type: "string" },
+                ignoreCase: { type: "boolean" },
+                literal: { type: "boolean" },
+                context: { type: "number" },
+                limit: { type: "number" }
+              },
+              required: ["pattern"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("grep");
+    expect(feedback.args).toEqual({
+      pattern: "TODO",
+      path: "src",
+      glob: "*.tsx",
+      caseInsensitive: true,
+      literal: true,
+      context: 2,
+      headLimit: 10
+    });
+    expect(feedback.result.value.text).toBe("src/App.tsx:1:TODO");
+  });
+
+  it("feeds pi ls results back with SDK list argument names", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "list files" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_ls",
+                type: "function",
+                function: {
+                  name: "ls",
+                  arguments: JSON.stringify({ path: "src", limit: 20 })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_ls", content: "App.tsx" }
+        ],
+        tools: [
+          {
+            name: "ls",
+            input_schema: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                limit: { type: "number" }
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("ls");
+    expect(feedback.args).toEqual({ path: "src", limit: 20 });
+    expect(feedback.result.value.text).toBe("App.tsx");
+  });
+
+  it("maps SDK builtins to schema-compatible prefixed server tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "probe_write_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              file_path: { type: "string" },
+              contents: { type: "string" }
+            },
+            required: ["file_path", "contents"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "write",
+          arguments: {
+            path: "src/App.tsx",
+            fileText: "export default function App() { return null }"
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("probe_write_file");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      file_path: "src/App.tsx",
+      contents: "export default function App() { return null }"
+    });
+  });
+
+  it("does not map SDK edits to schemas missing replacement arguments", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "replace_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+              search: { type: "string" }
+            },
+            required: ["path", "search"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("does not map exact SDK edit names to incompatible schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "edit",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+              search: { type: "string" }
+            },
+            required: ["path", "search"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("accepts exact client-native batch edit arguments before SDK shape heuristics", () => {
+    const arguments_ = {
+      path: "memory/2026-08-19.md",
+      edits: [{ oldText: "before", newText: "after" }]
+    };
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "edit",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+              edits: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    oldText: { type: "string" },
+                    newText: { type: "string" }
+                  },
+                  required: ["oldText", "newText"]
+                }
+              }
+            },
+            required: ["path", "edits"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: arguments_ }]
+    });
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].function.name).toBe("edit");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual(arguments_);
+  });
+
+  it("maps SDK ls calls to glob tools when a client has no ls tool", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "ls", arguments: { path: "src" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("glob");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "*", path: "src" });
+  });
+
+  it("emulates SDK file writes through shell when shell is the only compatible client tool", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              description: { type: "string" }
+            },
+            required: ["command", "description"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "write", arguments: { path: "src/App.tsx", fileText: "hello\nworld" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("bash");
+    const args = JSON.parse(toolCalls[0].function.arguments);
+    expect(args.command).toContain("cat > 'src/App.tsx'");
+    expect(args.command).toContain("hello\nworld");
+    expect(args.description).toContain("mkdir -p");
+  });
+
+  it("emulates SDK partial reads through shell without reading the whole file", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              description: { type: "string" }
+            },
+            required: ["command", "description"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "read", arguments: { path: "src/App.tsx", offset: 5, limit: 10 } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("bash");
+    const args = JSON.parse(toolCalls[0].function.arguments);
+    expect(args.command).toBe("sed -n '5,14p' 'src/App.tsx'");
+    expect(args.description).toBe("Runs sed -n '5,14p' 'src/App.tsx'");
+  });
+
+  it("emulates SDK edits through shell when shell is the only compatible client tool", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "run_command",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              description: { type: "string" }
+            },
+            required: ["command", "description"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("run_command");
+    const args = JSON.parse(toolCalls[0].function.arguments);
+    expect(args.command).toContain("from pathlib import Path");
+    expect(args.command).toContain('path = Path("src/App.tsx")');
+    expect(args.command).toContain('old = "return null"');
+    expect(args.command).toContain('new = "return <main />"');
+    expect(args.command).toContain("text.replace(old, new, 1)");
+    expect(args.description).toContain("python3");
+  });
+
+  it("feeds emulated shell tool results back with the original SDK arguments", () => {
+    const tools = [
+      {
+        name: "bash",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            command: { type: "string" },
+            description: { type: "string" }
+          },
+          required: ["command", "description"]
+        }
+      }
+    ];
+    const generated = toOpenAiToolCalls({
+      responseId: "chatcmpl_shell_memory",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "read", arguments: { path: "src/App.tsx", offset: 5, limit: 10 } }
+      ]
+    });
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "build a todo app" },
+          { role: "assistant", content: null, tool_calls: generated },
+          { role: "tool", tool_call_id: generated[0].id, content: "{\"exitCode\":0,\"stdout\":\"\",\"stderr\":\"\"}" },
+          { role: "tool", tool_call_id: generated[1].id, content: "{\"exitCode\":0,\"stdout\":\"\",\"stderr\":\"\"}" },
+          { role: "tool", tool_call_id: generated[2].id, content: "line 5" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const feedback = prepared.prompt.text
+      .split("\n")
+      .filter((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "))
+      .map((line) => JSON.parse(line.slice("LOCAL OPENCODE TOOL RESULT: ".length)));
+
+    expect(generated.map((call) => call.function.name)).toEqual(["bash", "bash", "bash"]);
+    expect(feedback.map((item) => item.name)).toEqual(["write", "edit", "read"]);
+    expect(feedback.map((item) => item.args)).toEqual([
+      { path: "src/App.tsx", fileText: "export default function App() { return null }" },
+      { path: "src/App.tsx", oldString: "return null", newString: "return <main />" },
+      { path: "src/App.tsx", offset: 5, limit: 10 }
+    ]);
+  });
+
+  it("maps Cursor SDK MCP calls to generic wrapper functions", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "call_mcp_tool",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              serverName: { type: "string" },
+              toolName: { type: "string" },
+              arguments: { type: "object" }
+            },
+            required: ["serverName", "toolName", "arguments"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "filesystem",
+            toolName: "write_file",
+            args: { file_path: "src/App.tsx", contents: "ok" }
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("call_mcp_tool");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      serverName: "filesystem",
+      toolName: "write_file",
+      arguments: { file_path: "src/App.tsx", contents: "ok" }
+    });
+  });
+
+  it("drops synthetic SDK shell workdirs so OpenCode uses its local cwd", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { command: { type: "string" }, workdir: { type: "string" } },
+            required: ["command"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "shell", arguments: { command: "npm install && npm test", workingDirectory: "/workspace" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ command: "npm install && npm test" });
+  });
+
+  it("fills required shell cwd and timeout fields for strict harness command tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "run_command",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              cwd: { type: "string" },
+              timeout_ms: { type: "number" },
+              description: { type: "string" }
+            },
+            required: ["command", "cwd", "timeout_ms", "description"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "shell", arguments: { command: "npm test", workingDirectory: "/workspace" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      command: "npm test",
+      cwd: ".",
+      timeout_ms: 120_000,
+      description: "Runs npm test"
+    });
+  });
+
+  it("backgrounds SDK server shell calls so OpenCode is not blocked", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              workdir: { type: "string" },
+              description: { type: "string" }
+            },
+            required: ["command", "description"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "shell",
+          arguments: {
+            command: "python3 -m http.server 8080",
+            workingDirectory: "/Users/example/site"
+          }
+        }
+      ]
+    });
+
+    const args = JSON.parse(toolCalls[0].function.arguments) as Record<string, string>;
+    expect(args.command).toContain("nohup sh -lc 'python3 -m http.server 8080'");
+    expect(args.command).toMatch(/\/tmp\/opencode-background-[0-9a-f]{8}\.log/);
+    expect(args.command).toContain("& echo \"Started background process pid=$!");
+    expect(args.workdir).toBe("/Users/example/site");
+    expect(args.description).toBe("Starts background process: Runs python3 -m http.server 8080");
+  });
+
+  it("preserves recursive Cursor targeting without leaking absolute target paths into glob patterns", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { pattern: { type: "string" } },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "file_search", arguments: { targeting: "/Users/example/project/**", glob_pattern: "*.ts" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.ts" });
+  });
+
+  it("repairs swapped SDK glob pattern and path values", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "**/*.tsx", globPattern: "/tmp/project" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "/tmp/project" });
+  });
+
+  it("repairs swapped SDK glob values when the search root is current directory", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "**/*", globPattern: "." } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*", path: "." });
+  });
+
+  it("defaults empty SDK glob calls to a valid OpenCode workspace glob", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { pattern: { type: "string" } },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: {} }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*" });
+  });
+
+  it("does not emit schema-invalid file tool calls", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "write",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["filePath", "content"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "write", arguments: { path: "src/App.tsx" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("explains schema-invalid file tool call retries with required client arguments", () => {
+    const tools = [
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filePath: { type: "string" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      }
+    ];
+
+    const hint = toolCallRetryHint({
+      tools,
+      toolCall: { name: "write", arguments: { path: "src/App.tsx" } }
+    });
+
+    expect(hint).toContain("SDK write mapped to client write");
+    expect(hint).toContain("Normalized arguments");
+    expect(hint).toContain("filePath");
+    expect(hint).toContain("content:string");
+  });
+
+  it("maps SDK directory-only glob calls to a valid OpenCode glob", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "src" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*", path: "src" });
+  });
+
+  it("fills a required glob path with the harness workspace root", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern", "path"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "." });
+  });
+
+  it("maps SDK glob calls to query-based file search schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "file_search",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              query: { type: "string" },
+              basePath: { type: "string" }
+            },
+            required: ["query"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "src" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("file_search");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ query: "**/*.tsx", basePath: "src" });
+  });
+
+  it("maps SDK ls calls to query-based file search schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "find_files",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePattern: { type: "string" },
+              root: { type: "string" }
+            },
+            required: ["filePattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "ls", arguments: { path: "src" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("find_files");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ filePattern: "*", root: "src" });
+  });
+
+  it("does not map SDK glob calls to generic semantic query tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "semantic_search",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { query: { type: "string" } },
+            required: ["query"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("does not emit schema-invalid specific MCP tool calls", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "mcp__github__create_issue",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string" },
+              body: { type: "string" }
+            },
+            required: ["title"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            providerIdentifier: "github",
+            toolName: "create_issue",
+            args: { body: "Missing required title" }
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("does not emit wrapper MCP calls with schema-invalid nested input", () => {
+    const tools = [
+      {
+        name: "call_mcp_tool",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            serverName: { type: "string" },
+            toolName: { type: "string" },
+            input: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                file_path: { type: "string" },
+                contents: { type: "string" }
+              },
+              required: ["file_path", "contents"]
+            }
+          },
+          required: ["serverName", "toolName", "input"]
+        }
+      }
+    ];
+    const missingContentsCall = {
+      name: "mcp",
+      arguments: {
+        providerIdentifier: "filesystem",
+        toolName: "write_file",
+        args: { file_path: "src/App.tsx" }
+      }
+    };
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [missingContentsCall]
+    });
+    const hint = toolCallRetryHint({ tools, toolCall: missingContentsCall });
+
+    expect(toolCalls).toEqual([]);
+    expect(hint).toContain("input.file_path:string");
+    expect(hint).toContain("input.contents:string");
+  });
+
+  it("maps SDK file operations to Anthropic-style text editor schemas", () => {
+    const tools = [
+      {
+        name: "str_replace_editor",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            command: { type: "string" },
+            path: { type: "string" },
+            file_text: { type: "string" },
+            old_str: { type: "string" },
+            new_str: { type: "string" },
+            view_range: { type: "array", items: { type: "integer" } }
+          },
+          required: ["command", "path"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "read", arguments: { path: "src/App.tsx", offset: 10, limit: 20 } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["str_replace_editor", "str_replace_editor", "str_replace_editor"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { command: "create", path: "src/App.tsx", file_text: "export default function App() { return null }" },
+      { command: "view", path: "src/App.tsx", view_range: [10, 29] },
+      { command: "str_replace", path: "src/App.tsx", old_str: "Hello", new_str: "Hi" }
+    ]);
+  });
+
+  it("maps SDK file operations to action-based compound file tools", () => {
+    const tools = [
+      {
+        name: "file_manager",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", enum: ["read", "write", "replace", "delete"] },
+            path: { type: "string" },
+            content: { type: "string" },
+            old: { type: "string" },
+            replacement: { type: "string" },
+            offset: { type: "integer" },
+            limit: { type: "integer" }
+          },
+          required: ["action", "path"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "read", arguments: { path: "src/App.tsx", offset: 5, limit: 10 } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } },
+        { name: "delete", arguments: { path: "src/old.tsx" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["file_manager", "file_manager", "file_manager", "file_manager"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { action: "write", path: "src/App.tsx", content: "export default function App() { return null }" },
+      { action: "read", path: "src/App.tsx", offset: 5, limit: 10 },
+      { action: "replace", path: "src/App.tsx", old: "Hello", replacement: "Hi" },
+      { action: "delete", path: "src/old.tsx" }
+    ]);
+  });
+
+  it("maps SDK edit streamContent calls to write-compatible tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "write_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["filePath", "content"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "edit",
+          arguments: {
+            path: "src/App.tsx",
+            streamContent: "export default function App() { return null }"
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls[0].function.name).toBe("write_file");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      filePath: "src/App.tsx",
+      content: "export default function App() { return null }"
+    });
+  });
+
+  it("maps SDK calls into wrapper object tool schemas", () => {
+    const tools = [
+      {
+        name: "wrapped_bash",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            input: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                command: { type: "string" },
+                workdir: { type: "string" }
+              },
+              required: ["command"]
+            }
+          },
+          required: ["input"]
+        }
+      },
+      {
+        name: "wrapped_files",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            input: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                action: { type: "string", enum: ["read", "write", "replace", "delete"] },
+                path: { type: "string" },
+                content: { type: "string" },
+                old: { type: "string" },
+                replacement: { type: "string" }
+              },
+              required: ["action", "path"]
+            }
+          },
+          required: ["input"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm test", workingDirectory: "/tmp/app" } },
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["wrapped_bash", "wrapped_files", "wrapped_files"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { input: { command: "npm test", workdir: "/tmp/app" } },
+      { input: { action: "write", path: "src/App.tsx", content: "export default function App() { return null }" } },
+      { input: { action: "replace", path: "src/App.tsx", old: "Hello", replacement: "Hi" } }
+    ]);
+  });
+
+  it("maps SDK patchContent edits to apply-patch style tools", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/App.tsx",
+      "@@",
+      "-return null",
+      "+return <main />",
+      "*** End Patch"
+    ].join("\n");
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "apply_patch",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              patch: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["patch"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: { path: "src/App.tsx", patchContent: patch } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      path: "src/App.tsx",
+      patch
+    });
+  });
+
+  it("maps SDK patchContent edits without a separate path to patch-only tools", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/App.tsx",
+      "@@",
+      "-return null",
+      "+return <main />",
+      "*** End Patch"
+    ].join("\n");
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "apply_patch",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              patch: { type: "string" }
+            },
+            required: ["patch"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "edit", arguments: { patchContent: patch } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ patch });
+    expect(
+      responseObject({
+        id: "resp_patch",
+        created: 1,
+        model: "composer-2.5",
+        text: "",
+        toolCalls,
+        promptChars: 20
+      }).output
+    ).toEqual([
+      expect.objectContaining({
+        type: "function_call",
+        call_id: toolCalls[0].id,
+        name: "apply_patch",
+        arguments: JSON.stringify({ patch })
+      })
+    ]);
+  });
+
+  it("maps SDK file operations to apply-patch style tools", () => {
+    const tools = [
+      {
+        name: "apply_patch",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            patch: { type: "string" },
+            path: { type: "string" }
+          },
+          required: ["patch"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() {\n  return null\n}\n" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "delete", arguments: { path: "src/old.tsx" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["apply_patch", "apply_patch", "apply_patch"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        path: "src/App.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Add File: src/App.tsx",
+          "+export default function App() {",
+          "+  return null",
+          "+}",
+          "*** End Patch"
+        ].join("\n")
+      },
+      {
+        path: "src/App.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Update File: src/App.tsx",
+          "@@",
+          "-return null",
+          "+return <main />",
+          "*** End Patch"
+        ].join("\n")
+      },
+      {
+        path: "src/old.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Delete File: src/old.tsx",
+          "*** End Patch"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("does not emit SDK-native tool names outside the advertised client tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "notify",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { message: { type: "string" } },
+            required: ["message"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "shell", arguments: { command: "pwd" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("keeps raw SDK tool calls only when the client did not provide a tool inventory", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [],
+      toolCalls: [{ name: "shell", arguments: { command: "pwd" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("shell");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ command: "pwd" });
+  });
+});

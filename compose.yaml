@@ -1,0 +1,96 @@
+name: cursor2response
+
+x-runtime: &runtime
+  build: .
+  image: cursor2response:local
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 20s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  bridge:
+    <<: *runtime
+    environment:
+      CURSOR_SDK_BRIDGE_HOST: 0.0.0.0
+      CURSOR_SDK_BRIDGE_PORT: 6719
+      CURSOR_SDK_BRIDGE_TOKEN: ${CURSOR_SDK_BRIDGE_TOKEN:?Set CURSOR_SDK_BRIDGE_TOKEN in .env}
+      CURSOR_SDK_WORKING_DIRECTORY: /workspace
+      CURSOR_SDK_BRIDGE_AGENT_STATE_DIR: /data/state/bridge-agents
+      CURSOR_SDK_BRIDGE_MAX_JSON_BYTES: 33554432
+      CURSOR2RESPONSE_TRACE_LOG_DIR: /data/logs
+    volumes:
+      - sdk-state:/home/node/.cursor
+      - bridge-state:/data/state
+      - trace-logs:/data/logs
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:6719/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  api:
+    <<: *runtime
+    command: [node, scripts/structured-log-runner.mjs, sidecar, --, node, dist/runtime/sidecar/server.js]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 6718
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      CURSOR_SDK_BRIDGE_URL: http://bridge:6719/sdk
+      CURSOR_SDK_BRIDGE_TOKEN: ${CURSOR_SDK_BRIDGE_TOKEN:?Set CURSOR_SDK_BRIDGE_TOKEN in .env}
+      CURSOR_SDK_BRIDGE_TIMEOUT_MS: 310000
+      XDG_STATE_HOME: /data/state
+      CURSOR2RESPONSE_TRACE_LOG_DIR: /data/logs
+      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL: ${CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_BASE_URL:-}
+      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY: ${CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_API_KEY:-}
+      CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL: ${CURSOR2RESPONSE_GROK_HYBRID_FALLBACK_MODEL:-}
+      CURSOR2RESPONSE_GROK_HYBRID_NOTIFY: "0"
+    ports:
+      - "127.0.0.1:${API_PORT:-6718}:6718"
+    volumes:
+      - api-state:/data/state
+      - trace-logs:/data/logs
+    depends_on:
+      bridge:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:6718/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  viewer:
+    <<: *runtime
+    command: [node, tools/trace-viewer/server.mjs]
+    environment:
+      CURSOR2RESPONSE_TRACE_VIEWER_HOST: 0.0.0.0
+      CURSOR2RESPONSE_TRACE_VIEWER_PORT: 8100
+      CURSOR2RESPONSE_TRACE_VIEWER_DIR: /data/traces
+      CURSOR2RESPONSE_TRACE_LOG_DIR: /data/logs
+      CURSOR2RESPONSE_TRACE_VIEWER_BRIDGE_URL: http://bridge:6719
+      CURSOR_SDK_BRIDGE_TOKEN: ${CURSOR_SDK_BRIDGE_TOKEN:?Set CURSOR_SDK_BRIDGE_TOKEN in .env}
+    ports:
+      - "127.0.0.1:${VIEWER_PORT:-8100}:8100"
+    volumes:
+      - viewer-traces:/data/traces
+      - trace-logs:/data/logs:ro
+    depends_on:
+      bridge:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  sdk-state:
+  bridge-state:
+  api-state:
+  trace-logs:
+  viewer-traces:
