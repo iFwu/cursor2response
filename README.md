@@ -47,11 +47,79 @@ Both published ports bind to localhost by default. Keep `.env` private. The View
 
 See [local deployment](docs/runbooks/local-deployment.md) for configuration, source execution, updates, and backups. Images are built locally from source; no hosted gateway or prebuilt release image is provided.
 
+## Connect a client
+
+Use a model ID from `/v1/models` in place of `MODEL_ID`. The client process must have `CURSOR_API_KEY` in its environment; the gateway's `.env` does not configure a separate client process.
+
+```bash
+export CURSOR_API_KEY="your-cursor-api-key"
+```
+
+### Codex
+
+Merge these settings into `~/.codex/config.toml`, keeping root settings above any TOML tables:
+
+```toml
+model_provider = "cursor2response"
+model = "MODEL_ID"
+
+[model_providers.cursor2response]
+name = "cursor2response"
+base_url = "http://127.0.0.1:6718/v1"
+wire_api = "responses"
+env_key = "CURSOR_API_KEY"
+```
+
+Run `codex` from a terminal with `CURSOR_API_KEY` set. No named profile is required.
+
+### OpenClaw
+
+Merge this into `~/.openclaw/openclaw.json`; replace both occurrences of `MODEL_ID`:
+
+```json5
+{
+  models: {
+    mode: "merge",
+    providers: {
+      cursor2response: {
+        baseUrl: "http://127.0.0.1:6718/v1",
+        apiKey: "${CURSOR_API_KEY}",
+        api: "openai-responses",
+        models: [{ id: "MODEL_ID", name: "Cursor" }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "cursor2response/MODEL_ID" },
+    },
+  },
+}
+```
+
+If you already use an `agents.defaults.models` allowlist, add `cursor2response/MODEL_ID` there. Make the key available to the actual Gateway process; exporting it in a different terminal does not update a running service. Apply the configuration through your normal OpenClaw service workflow.
+
+The example leaves context limits unset. Defaults are not measured SDK limits: choose `contextWindow` and `agents.defaults.contextTokens` for your model and configured route, as described in [context budgets](docs/specs/grok-hybrid.md#client-context-budgets).
+
+### Claude Code (best effort)
+
+With Claude Code installed, use a Claude model ID available through `/v1/models`. Its base URL excludes `/v1`:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:6718 \
+ANTHROPIC_API_KEY="$CURSOR_API_KEY" \
+claude --model MODEL_ID
+```
+
+This uses the Anthropic Messages adapter, which remains best effort. Check `/status` in Claude Code to confirm the base URL and active credential; see [Claude Code gateway configuration](https://code.claude.com/docs/en/llm-gateway-connect) for persistent settings.
+
 ## Trace your conversation
 
 The Viewer connects a session's requests, Agent lanes, SDK Runs, tool calls, and route changes. It makes context reuse, replay, and tool continuation visible without piecing together raw logs.
 
 ![Trace Viewer session timeline](docs/images/trace-timeline.png)
+
+Recognized Codex/OpenClaw harness context is collapsed into secondary entries, keeping the user request and tool activity easy to find.
 
 The runtime view queries the Bridge for its current Agents and pending work. Historical traces explain what happened; the runtime snapshot shows what is still active.
 
@@ -75,6 +143,10 @@ Screenshots use synthetic demonstration data. See the [Trace Viewer guide](docs/
 An HTTP request is not an SDK Run: one Run can span multiple tool round trips. A later user turn can start a new Run on the same Agent, or steer eligible active work. Reuse depends on a compatible session identity and conversation history; explicit recovery boundaries can still require full replay. Cache behavior remains provider-controlled, so no fixed hit rate is promised.
 
 Fallback is deliberately scoped: selecting `grok-hybrid` or `grok-hybrid-fast` and configuring its provider enables it. Confirmed SDK context compaction triggers the policy; ordinary errors do not. Immediate fallback requires confirmed cleanup and no public output yet, and subsequent requests follow the recorded route. See the [routing contract](docs/specs/grok-hybrid.md).
+
+Grok model IDs also select speed: `grok-hybrid-fast` uses the Fast SDK route with configured overflow fallback; `cursor-grok-fast` goes directly through Cursor. Low-level requests can use Fast parameters, including `service_tier`; explicit parameter precedence is described in the [routing contract](docs/specs/grok-hybrid.md#identity-and-state).
+
+Responses also supports a native `system_prompt` extension: a non-empty string replaces the main Agent's Cursor system prompt, while omission or `false` uses the SDK default. This requires account support, is unavailable on Grok hybrid routes, and must stay consistent across requests reusing an Agent. See the [system prompt contract](docs/specs/responses-agent-context-affinity.md#native-system-prompt).
 
 ## Why this project exists
 
@@ -105,7 +177,16 @@ node server.mjs start
 node server.mjs status
 ```
 
-The launcher starts the API and Bridge on loopback, generates their internal token, and keeps process state and logs under `~/.cursor2response`. Stop them with `node server.mjs stop`. To run the Viewer alongside them with shared trace logs, follow the [source deployment instructions](docs/runbooks/local-deployment.md#direct-source-execution).
+The launcher is a lightweight API + Bridge mode. It generates its own internal token and keeps process state and launcher logs under `~/.cursor2response`. Stop it with `node server.mjs stop`. A separately started Viewer does not discover that token. For the complete API + Bridge + Viewer setup, use Docker Compose or the [three-terminal source setup](docs/runbooks/local-deployment.md#direct-source-execution) instead of the launcher.
+
+With the API running and `CURSOR_API_KEY` exported, list models from the checkout without a raw JSON response:
+
+```bash
+node server.mjs models
+node server.mjs models --json
+```
+
+Use `--port PORT` if the API uses a different port.
 
 ## Development and documentation
 

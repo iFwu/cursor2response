@@ -42,6 +42,8 @@ Recheck health, runtime identity, served Viewer assets, and the behavior affecte
 
 ## Direct source execution
 
+This is the complete three-process layout with shared Bridge authentication. If you previously used `node server.mjs start`, stop that managed stack with `node server.mjs stop` before using these commands on the same ports. The launcher generates a separate internal token; starting `npm run trace:viewer` beside it does not automatically connect runtime inspection.
+
 Install Node.js 24 LTS, then:
 
 ```bash

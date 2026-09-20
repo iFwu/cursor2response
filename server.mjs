@@ -6,8 +6,6 @@
  *   node server.mjs stop
  *   node server.mjs status
  *   node server.mjs models [--json] [--port 6718]
- *   node server.mjs claude [--port 6718] [-- ...claude args]
- *   node server.mjs codex [--port 6718] [--profile NAME] [-- ...codex args]
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -40,11 +38,9 @@ Usage:
   node server.mjs stop
   node server.mjs status
   node server.mjs models [--json] [--port PORT]
-  node server.mjs claude [--port PORT] [-- ...args]
-  node server.mjs codex [--port PORT] [--profile NAME] [-- ...args]
 
 Environment:
-  CURSOR_API_KEY   Cursor Dashboard API key (crsr_…), required for models/claude/codex
+  CURSOR_API_KEY   Cursor Dashboard API key (crsr_…), required for models
 
 Defaults:
   port=${DEFAULT_PORT}  host=127.0.0.1  runtime=${RUNTIME_DIR}
@@ -113,19 +109,6 @@ function writeState(state) {
 
 function clearState() {
   if (existsSync(STATE_PATH)) rmSync(STATE_PATH, { force: true });
-}
-
-function commandExists(name) {
-  const probe = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(probe, [name], { stdio: "ignore" });
-  return result.status === 0;
-}
-
-function resolveExecutable(name) {
-  if (!commandExists(name)) {
-    throw new Error(`Required executable not found on PATH: ${name}`);
-  }
-  return name;
 }
 
 function assertDependencies() {
@@ -411,35 +394,6 @@ async function cmdModels(flags) {
   }
 }
 
-function spawnClient(command, args, env) {
-  const child = spawn(command, args, {
-    stdio: "inherit",
-    env: { ...process.env, ...env },
-    shell: process.platform === "win32"
-  });
-  child.on("exit", (code, signal) => {
-    process.exit(code ?? (signal ? 1 : 0));
-  });
-}
-
-function cmdClaude(flags, rest) {
-  requireApiKey();
-  const port = requireCommand(flags);
-  const host = requireHost(flags);
-  spawnClient("claude", rest, {
-    ANTHROPIC_BASE_URL: `http://${host}:${port}`,
-    ANTHROPIC_API_KEY: process.env.CURSOR_API_KEY
-  });
-}
-
-function cmdCodex(flags, rest) {
-  const apiKey = requireApiKey();
-  const profile = String(flags.profile ?? "cursor6718");
-  spawnClient("codex", ["-p", profile, ...rest], {
-    CODEX_API_KEY: apiKey
-  });
-}
-
 function cryptoRandomHex(bytes) {
   const buffer = new Uint8Array(bytes);
   crypto.getRandomValues(buffer);
@@ -455,8 +409,6 @@ async function main() {
     process.exit(command ? 0 : 1);
   }
 
-  const rest = positional.slice(1);
-
   switch (command) {
     case "start":
       await cmdStart(flags);
@@ -469,12 +421,6 @@ async function main() {
       break;
     case "models":
       await cmdModels(flags);
-      break;
-    case "claude":
-      cmdClaude(flags, rest);
-      break;
-    case "codex":
-      cmdCodex(flags, rest);
       break;
     default:
       console.error(`Unknown command: ${command}\n`);

@@ -47,11 +47,79 @@ curl --fail http://127.0.0.1:6718/v1/models \
 
 配置、源码运行、升级和备份见[本地部署指南](docs/runbooks/local-deployment.md)。镜像由源码在本地构建，项目不提供托管网关或预构建发布镜像。
 
+## 接入客户端
+
+将 `MODEL_ID` 替换为 `/v1/models` 返回的模型 ID。客户端进程的环境中需要有 `CURSOR_API_KEY`；网关的 `.env` 不会自动配置另一个客户端进程。
+
+```bash
+export CURSOR_API_KEY="your-cursor-api-key"
+```
+
+### Codex
+
+将以下设置合并到 `~/.codex/config.toml`，根级设置应放在 TOML table 之前：
+
+```toml
+model_provider = "cursor2response"
+model = "MODEL_ID"
+
+[model_providers.cursor2response]
+name = "cursor2response"
+base_url = "http://127.0.0.1:6718/v1"
+wire_api = "responses"
+env_key = "CURSOR_API_KEY"
+```
+
+在已设置 `CURSOR_API_KEY` 的终端运行 `codex`，无需预先创建 named profile。
+
+### OpenClaw
+
+将以下内容合并到 `~/.openclaw/openclaw.json`，替换两处 `MODEL_ID`：
+
+```json5
+{
+  models: {
+    mode: "merge",
+    providers: {
+      cursor2response: {
+        baseUrl: "http://127.0.0.1:6718/v1",
+        apiKey: "${CURSOR_API_KEY}",
+        api: "openai-responses",
+        models: [{ id: "MODEL_ID", name: "Cursor" }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "cursor2response/MODEL_ID" },
+    },
+  },
+}
+```
+
+如果已有 `agents.defaults.models` 模型 allowlist，需要将 `cursor2response/MODEL_ID` 加入其中。Key 必须在实际运行 Gateway 的进程环境中可用；在另一个终端执行 `export` 不会改变已运行服务的环境。按现有 OpenClaw 服务管理方式使配置生效。
+
+示例未指定上下文限制。默认值不等于实测 SDK 上限；请根据所选模型和配置的路由设置 `contextWindow` 与 `agents.defaults.contextTokens`，说明见[上下文预算](docs/specs/grok-hybrid.md#client-context-budgets)。
+
+### Claude Code（best effort）
+
+安装 Claude Code 后，选用 `/v1/models` 返回的可用 Claude 模型 ID。这里的 base URL 不带 `/v1`：
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:6718 \
+ANTHROPIC_API_KEY="$CURSOR_API_KEY" \
+claude --model MODEL_ID
+```
+
+此方式使用 best-effort Anthropic Messages 适配。可在 Claude Code 的 `/status` 中确认 base URL 和生效的凭据；持久化设置见 [Claude Code 网关配置](https://code.claude.com/docs/en/llm-gateway-connect)。
+
 ## 看清一次会话的执行过程
 
 Trace Viewer 将同一 session 的请求、Agent lanes、SDK Runs、工具调用和路由变化串起来，直接查看上下文复用、replay 和工具续接，无需逐条拼接原始日志。
 
 ![Trace Viewer 会话时间线](docs/images/trace-timeline.png)
+
+识别出的 Codex/OpenClaw harness 上下文会折叠为次级条目，让用户请求和工具活动更容易找到。
 
 Runtime 页面从 Bridge 查询当前 Agent 和待处理任务。历史 trace 用来解释已经发生的过程，runtime snapshot 用来确认此刻仍在运行的状态。
 
@@ -75,6 +143,10 @@ Runtime 页面从 Bridge 查询当前 Agent 和待处理任务。历史 trace �
 一次 HTTP 请求不等于一次 SDK Run：同一个 Run 可以跨越多轮工具请求。后续用户轮次可以在原 Agent 上开启新 Run，也可以 steer 符合条件的活跃执行。复用需要稳定且兼容的 session identity 和对话历史；明确的恢复边界仍可能触发完整 replay。缓存行为由 provider 决定，项目不承诺固定命中率。
 
 Fallback 有明确范围：选择 `grok-hybrid` 或 `grok-hybrid-fast` 并配置 provider 后才会启用。只有确认 SDK context compaction 才触发，普通错误不会触发。当前请求立即 fallback 还需要确认清理完成且尚未输出公开内容，后续请求则沿已记录的路由继续。详见[路由契约](docs/specs/grok-hybrid.md)。
+
+Grok 也可通过模型 ID 选择速度：`grok-hybrid-fast` 使用 Fast SDK 路由并保留已配置的溢出 fallback；`cursor-grok-fast` 直接走 Cursor。底层请求还可使用 `service_tier` 等 Fast 参数，显式参数的优先级见[路由契约](docs/specs/grok-hybrid.md#identity-and-state)。
+
+Responses 还支持原生 `system_prompt` 扩展：非空字符串替换主 Agent 的 Cursor system prompt；省略或设为 `false` 使用 SDK 默认值。覆盖需要账号支持，不适用于 Grok hybrid 路由；复用同一 Agent 的各次请求应保持该值一致。详见[系统提示词契约](docs/specs/responses-agent-context-affinity.md#native-system-prompt)。
 
 ## 项目缘起
 
@@ -105,7 +177,16 @@ node server.mjs start
 node server.mjs status
 ```
 
-Launcher 在 loopback 启动 API 与 Bridge，生成内部 token，并将进程状态和日志放在 `~/.cursor2response`。使用 `node server.mjs stop` 停止。需要同时运行 Viewer 并共享 trace 日志时，按[源码部署说明](docs/runbooks/local-deployment.md#direct-source-execution)配置。
+Launcher 是轻量的 API + Bridge 启动方式，会生成自己的内部 token，并将进程状态和 launcher 日志放在 `~/.cursor2response`。使用 `node server.mjs stop` 停止。单独启动 Viewer 不会自动发现该 token；需要完整 API + Bridge + Viewer 时，请使用 Docker Compose 或[三终端源码部署](docs/runbooks/local-deployment.md#direct-source-execution)，不要混用 launcher。
+
+API 启动后，在已导出 `CURSOR_API_KEY` 的终端中，可从源码目录以表格查看模型：
+
+```bash
+node server.mjs models
+node server.mjs models --json
+```
+
+API 使用其他端口时附加 `--port PORT`。
 
 ## 开发与文档
 
