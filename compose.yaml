@@ -23,6 +23,14 @@ services:
       CURSOR_SDK_BRIDGE_AGENT_STATE_DIR: /data/state/bridge-agents
       CURSOR_SDK_BRIDGE_MAX_JSON_BYTES: 33554432
       CURSOR2RESPONSE_TRACE_LOG_DIR: /data/logs
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,0.0.0.0,::1,bridge,api,viewer}
+      NODE_USE_ENV_PROXY: ${NODE_USE_ENV_PROXY:-1}
+      NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-}
+      CURSOR_SDK_USE_HTTP1_FOR_AGENT: ${CURSOR_SDK_USE_HTTP1_FOR_AGENT:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - sdk-state:/home/node/.cursor
       - bridge-state:/data/state

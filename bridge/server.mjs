@@ -30,6 +30,7 @@ delete globalThis[Symbol.for(CURSOR_SDK_SUMMARY_HOOK_MARKER)];
 
 loadEnvFile(path.join(repoRoot, ".env"));
 loadEnvFile(path.join(process.cwd(), ".env"));
+configureCursorSdkNetwork(Cursor, process.env);
 
 const host = process.env.CURSOR_SDK_BRIDGE_HOST || "127.0.0.1";
 const port = parseInteger(process.env.CURSOR_SDK_BRIDGE_PORT, 8792);
@@ -584,6 +585,7 @@ export {
   bindPendingAgentRunAbort,
   clientMcpToolDefinitions,
   clientForwardingMcpServerSource,
+  configureCursorSdkNetwork,
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
@@ -6619,6 +6621,24 @@ function bearerToken(request) {
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function configureCursorSdkNetwork(cursor, environment) {
+  const useHttp1ForAgent = optionalEnvironmentBoolean(
+    environment.CURSOR_SDK_USE_HTTP1_FOR_AGENT,
+    "CURSOR_SDK_USE_HTTP1_FOR_AGENT"
+  );
+  if (useHttp1ForAgent === undefined) return undefined;
+  cursor.configure({ local: { useHttp1ForAgent } });
+  return useHttp1ForAgent;
+}
+
+function optionalEnvironmentBoolean(value, name) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  throw new Error(`${name} must be one of: 1, 0, true, false, yes, no, on, off.`);
 }
 
 function isRecord(value) {

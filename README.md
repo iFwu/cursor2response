@@ -45,6 +45,8 @@ curl --fail http://127.0.0.1:6718/v1/models \
 
 > **Security Note**: Published ports bind strictly to `127.0.0.1` by default. The Trace Viewer has no built-in authentication—do not expose it to untrusted networks. If a default `CURSOR_API_KEY` is set in `.env`, any client reaching the API can consume its quota. For configuration, updates, and volume backups, see the [local deployment guide](docs/runbooks/local-deployment.md).
 
+If Cursor services require an outbound proxy, configure the standard HTTP(S) proxy variables in `.env`. Docker host addressing, HTTP/1.1 fallback, custom CA, and verification limits are covered in the [network proxy guide](docs/runbooks/local-deployment.md#network-proxy).
+
 ## Connect a client
 
 Replace `MODEL_ID` below with a model ID returned by `/v1/models`.
@@ -176,7 +178,7 @@ node server.mjs start
 node server.mjs status
 ```
 
-`server.mjs` provides a lightweight API + Bridge local daemon. Internal tokens and process states are stored in `~/.cursor2response`. Stop the daemon with `node server.mjs stop`.
+`server.mjs` loads the repository `.env` before starting a lightweight API + Bridge local daemon. Internal tokens and process states are stored in `~/.cursor2response`. Stop the daemon with `node server.mjs stop`.
 
 Once started, list available models in a clean terminal table:
 

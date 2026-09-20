@@ -45,6 +45,7 @@ import {
   clientForwardingMcpServerSource,
   clientMcpToolDefinitions,
   composerToolCallFromText,
+  configureCursorSdkNetwork,
   consumePendingAgentRun,
   cancelAgentRequest,
   createPendingAgentRun as createBridgePendingAgentRun,
@@ -6902,6 +6903,22 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(sendOptions).not.toHaveProperty("mcpServers");
     expect(sendOptions).not.toHaveProperty("local");
     expect(localAgentSendOptions(input, { force: true }).local).toEqual({ force: true });
+  });
+
+  it("configures the optional SDK HTTP/1.1 proxy fallback", () => {
+    const cursor = { configure: vi.fn() };
+
+    expect(configureCursorSdkNetwork(cursor, {})).toBeUndefined();
+    expect(cursor.configure).not.toHaveBeenCalled();
+
+    expect(configureCursorSdkNetwork(cursor, { CURSOR_SDK_USE_HTTP1_FOR_AGENT: "yes" })).toBe(true);
+    expect(cursor.configure).toHaveBeenLastCalledWith({ local: { useHttp1ForAgent: true } });
+
+    expect(configureCursorSdkNetwork(cursor, { CURSOR_SDK_USE_HTTP1_FOR_AGENT: "0" })).toBe(false);
+    expect(cursor.configure).toHaveBeenLastCalledWith({ local: { useHttp1ForAgent: false } });
+    expect(() => configureCursorSdkNetwork(cursor, {
+      CURSOR_SDK_USE_HTTP1_FOR_AGENT: "sometimes"
+    })).toThrow(/CURSOR_SDK_USE_HTTP1_FOR_AGENT must be one of/);
   });
 
   it("restricts agent creation to the MCP tool family so built-in tools cannot bypass client tools", () => {

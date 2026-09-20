@@ -35,6 +35,19 @@ test('rejects credentials without printing the credential value', () => reposito
   assert.ok(!result.stderr.includes(secret));
 }));
 
+test('allows only the exact Docker host gateway name among private hostnames', () => repository(({ write, check }) => {
+  write('config.txt', 'PROXY_HOST=host.docker.internal');
+  assert.equal(check().status, 0);
+
+  for (const prefix of ['backend.example', 'foo.host.docker']) {
+    const hostname = `${prefix}.internal`;
+    write('config.txt', `PROXY_HOST=${hostname}`);
+    const result = check();
+    assert.equal(result.status, 1, hostname);
+    assert.match(result.stderr, /private hostname/);
+  }
+}));
+
 test('checks the staged tree even when the working file has been cleaned', () => repository(({ directory, write, check }) => {
   write('.env', 'TOKEN=local-only');
   write('README.md', '[missing](missing.md)');

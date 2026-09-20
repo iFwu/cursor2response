@@ -24,6 +24,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
+const repoEnvironmentPath = path.join(repoRoot, ".env");
+if (existsSync(repoEnvironmentPath)) process.loadEnvFile(repoEnvironmentPath);
 const DEFAULT_PORT = 6718;
 const RUNTIME_DIR = path.join(os.homedir(), ".cursor2response");
 const STATE_PATH = path.join(RUNTIME_DIR, "state.json");

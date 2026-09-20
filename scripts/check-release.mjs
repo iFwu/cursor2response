@@ -16,7 +16,7 @@ const modes = new Map(git(['ls-files', '--stage', '-z']).toString().split('\0').
   return [entry.slice(tab + 1), entry.slice(0, 6)];
 }));
 const forbidden = [
-  ['private hostname', /\b(?:[\w-]+\.)+internal\b/i],
+  ['private hostname', /(?<![\w.-])(?!host\.docker\.internal\b)(?:[\w-]+\.)+internal\b/i],
   ['personal home path', /\/(?:home|Users)\/(?!example(?:\/|\b)|node(?:\/|\b))[a-z][\w.-]*\//i],
   ['private network address', /\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b/],
   ['provider credential', /\b(?:crsr_|sk-|ghp_|github_pat_)[A-Za-z0-9_-]{24,}\b/],

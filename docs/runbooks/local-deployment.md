@@ -91,6 +91,38 @@ node tools/trace-viewer/server.mjs
 
 The runner keeps bounded structured logs under `${XDG_STATE_HOME:-~/.local/state}/cursor2response/logs`; set `CURSOR2RESPONSE_TRACE_LOG_DIR` consistently for all three processes to override it. Ctrl-C stops a foreground process. The `node server.mjs start` launcher starts only API and Bridge through the same structured-log runner and manages its own internal token. Use Compose or the explicit commands above to configure the Viewer and Bridge authentication together.
 
+## Network proxy
+
+The Bridge accepts the standard HTTP proxy environment used by Cursor and Node.js:
+
+```dotenv
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+NO_PROXY=localhost,127.0.0.1,0.0.0.0,::1,bridge,api,viewer
+NODE_USE_ENV_PROXY=1
+```
+
+Only the Bridge receives these Compose settings, so Cursor SDK upstream traffic uses the proxy while Sidecar-to-Bridge and Viewer traffic stays local. `node server.mjs start` loads the repository `.env` before starting its child processes. For direct three-terminal execution, source `.env` before launching Node as shown above; `NODE_USE_ENV_PROXY` and `NODE_EXTRA_CA_CERTS` are startup settings.
+
+Some proxies cannot carry the SDK's HTTP/2 bidirectional stream. Set `CURSOR_SDK_USE_HTTP1_FOR_AGENT=1` to make the local SDK transport use HTTP/1.1 with SSE. Leave it unset unless the normal path fails.
+
+Compose maps `host.docker.internal` to the Docker host. The proxy must still listen on an address reachable from the container; a host service bound only to `127.0.0.1` is not reachable through the host gateway. This integration covers HTTP(S) proxies, not SOCKS proxy URLs. Keep the local names in `NO_PROXY` when customizing it.
+
+For a proxy that performs TLS inspection, set `NODE_EXTRA_CA_CERTS` to a trusted PEM bundle. Direct source execution can use a host path. In Docker, mount the bundle read-only with a Compose override and use its container path, for example:
+
+```yaml
+services:
+  bridge:
+    volumes:
+      - /path/on/host/proxy-ca.pem:/etc/cursor2response/proxy-ca.pem:ro
+```
+
+```dotenv
+NODE_EXTRA_CA_CERTS=/etc/cursor2response/proxy-ca.pem
+```
+
+Health endpoints only prove the local processes are running. Validate proxy connectivity with `/v1/models`, then exercise a representative Responses request; a successful health check is not proof that Cursor traffic reached the upstream service.
+
 ## SDK workspace in containers
 
 Compose sets `CURSOR_SDK_WORKING_DIRECTORY=/workspace` as the SDK execution directory. The client working directory remains part of session identity and forwarded tool context; host paths do not need to exist inside the container. The Bridge exposes client tools through MCP and does not use a host HOME mount. Keep the SDK execution directory stable across container replacement so checkpoints remain discoverable.

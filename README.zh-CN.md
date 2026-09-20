@@ -45,6 +45,8 @@ curl --fail http://127.0.0.1:6718/v1/models \
 
 > **安全提示**：对外端口默认仅绑定 `127.0.0.1`。Trace Viewer 无内置鉴权，请勿直接暴露至公网；配置了默认 `CURSOR_API_KEY` 时，任何可访问 API 的客户端均可消耗该配额。完整配置与持久化备份见[本地部署指南](docs/runbooks/local-deployment.md)。
 
+若当前网络需要代理才能访问 Cursor 服务，可在 `.env` 中配置标准 HTTP(S) 代理变量。Docker 宿主地址、HTTP/1.1 fallback、自定义 CA 与验收边界见[网络代理说明](docs/runbooks/local-deployment.md#network-proxy)。
+
 ## 接入客户端
 
 将下方配置中的 `MODEL_ID` 替换为 `/v1/models` 返回的实际模型 ID。
@@ -176,7 +178,7 @@ node server.mjs start
 node server.mjs status
 ```
 
-`server.mjs` 提供轻量级的 API + Bridge 本地后台守护，内部 Token 与进程状态存于 `~/.cursor2response`，使用 `node server.mjs stop` 停止。
+`server.mjs` 会先加载仓库中的 `.env`，再启动轻量级 API + Bridge 本地后台守护。内部 Token 与进程状态存于 `~/.cursor2response`，使用 `node server.mjs stop` 停止。
 
 启动后可在终端直接列出可用模型表格：
 

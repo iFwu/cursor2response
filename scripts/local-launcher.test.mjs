@@ -49,6 +49,12 @@ test('cleans the healthy Bridge and launch state when Sidecar startup fails', { 
   const fixture = createLauncherFixture();
   const bridgeReceipt = path.join(fixture.root, 'bridge-started.json');
   const sidecarReceipt = path.join(fixture.root, 'sidecar-started.json');
+  writeFileSync(path.join(fixture.root, '.env'), [
+    'HTTPS_PROXY=http://proxy.example:8080',
+    'NODE_USE_ENV_PROXY=1',
+    'CURSOR_SDK_USE_HTTP1_FOR_AGENT=1',
+    ''
+  ].join('\n'));
   writeFileSync(path.join(fixture.root, 'bridge/server.mjs'), `
 import { createServer } from 'node:http';
 import { writeFileSync } from 'node:fs';
@@ -61,7 +67,13 @@ const server = createServer((request, response) => {
   }));
 });
 server.listen(Number(process.env.CURSOR_SDK_BRIDGE_PORT), '127.0.0.1', () => {
-  writeFileSync('bridge-started.json', JSON.stringify({ pid: process.pid, port: server.address().port }));
+  writeFileSync('bridge-started.json', JSON.stringify({
+    pid: process.pid,
+    port: server.address().port,
+    httpsProxy: process.env.HTTPS_PROXY,
+    nodeUseEnvProxy: process.env.NODE_USE_ENV_PROXY,
+    useHttp1ForAgent: process.env.CURSOR_SDK_USE_HTTP1_FOR_AGENT
+  }));
 });
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 `);
@@ -80,6 +92,9 @@ process.exit(23);
     assert.match(started.stderr, /exited before .* became healthy/);
     const bridge = JSON.parse(readFileSync(bridgeReceipt, 'utf8'));
     const state = JSON.parse(readFileSync(sidecarReceipt, 'utf8'));
+    assert.equal(bridge.httpsProxy, 'http://proxy.example:8080');
+    assert.equal(bridge.nodeUseEnvProxy, '1');
+    assert.equal(bridge.useHttp1ForAgent, '1');
     assert.equal(state.bridgePort, bridge.port);
     assert.match(readFileSync(path.join(fixture.home, '.cursor2response/server.stderr.log'), 'utf8'), /Injected Sidecar startup failure/);
     assert.equal(existsSync(fixture.statePath), false);
@@ -149,6 +164,10 @@ function createLauncherFixture() {
   const environment = { ...process.env, HOME: home, USERPROFILE: home, XDG_STATE_HOME: path.join(home, 'state') };
   delete environment.CURSOR_API_KEY;
   delete environment.CURSOR2RESPONSE_TRACE_LOG_DIR;
+  delete environment.HTTP_PROXY;
+  delete environment.HTTPS_PROXY;
+  delete environment.NODE_USE_ENV_PROXY;
+  delete environment.CURSOR_SDK_USE_HTTP1_FOR_AGENT;
   return {
     directory, root, home, environment, statePath: path.join(home, '.cursor2response/state.json'),
     command: (action, port) => spawnSync(process.execPath, ['server.mjs', action, ...(port ? ['--port', String(port)] : [])], {
