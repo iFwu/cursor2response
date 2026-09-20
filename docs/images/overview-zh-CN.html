@@ -26,20 +26,20 @@ html[lang="zh-CN"] .hero p{font-size:37px}html[lang="zh-CN"] .continuity h2{font
   <header class="hero"><h1>cursor2response</h1><p>本地 Cursor 网关，<strong>Responses 优先。</strong></p></header>
   <div class="body-grid">
     <section class="continuity">
-      <p class="section-label">延续会话上下文</p><h2>让每次请求接上同一段会话。</h2>
+      <p class="section-label">会话上下文保持</p><h2>跨轮次请求复用同一 Agent 实例</h2>
       <div class="pipeline" aria-label="Codex and OpenClaw through Responses API to one warm SDK Agent">
         <div class="node"><span class="eyebrow">客户端</span><strong>Codex / OpenClaw</strong></div><span class="arrow" aria-hidden="true">→</span>
         <div class="node"><span class="eyebrow">协议入口</span><strong>Responses API</strong></div><span class="arrow" aria-hidden="true">→</span>
         <div class="node"><span class="eyebrow"><span class="warm-dot" aria-hidden="true"></span>会话复用</span><strong>One warm SDK Agent</strong></div>
       </div>
-      <div class="tool-loop"><div class="loop-lines"><span><span class="direction" aria-hidden="true">←</span>tool call → 客户端执行工具</span><span><span class="direction" aria-hidden="true">→</span>tool result → SDK 继续运行</span></div><div class="same-run"><small>工具往返继续</small><strong>same Run</strong></div></div>
+      <div class="tool-loop"><div class="loop-lines"><span><span class="direction" aria-hidden="true">←</span>tool call → 客户端执行工具</span><span><span class="direction" aria-hidden="true">→</span>tool result → SDK 继续运行</span></div><div class="same-run"><small>工具往返闭环</small><strong>same Run</strong></div></div>
     </section>
     <aside class="support-stack">
-      <section class="trace"><div class="support-label">看清每次执行</div><h2>Trace，让过程可读。</h2><p>查看 Agent 与 Run 轨迹、工具活动、路由切换，以及为什么发生 replay。</p></section>
-      <section class="steer"><h2>运行中的 native steer。</h2><p>新输入进入当前 Run，并由明确的归属与确认机制承接。</p></section>
+      <section class="trace"><div class="support-label">执行链路追踪</div><h2>Trace 全链路可视</h2><p>追踪 Agent 与 Run 轨迹、工具往返、路由切换，定位 Replay 根因。</p></section>
+      <section class="steer"><h2>原生 Native Steer</h2><p>新指令直接按序注入活跃 Run，无需中断当前执行。</p></section>
     </aside>
   </div>
-  <section class="fallback"><div><span class="flag">可选 · GROK HYBRID</span><h2>上下文溢出 fallback</h2></div><p>确认 context compaction 且满足安全条件后，可切换至<strong>配置的 Responses 端点</strong>；同一会话随后保持该路由。</p></section>
+  <section class="fallback"><div><span class="flag">可选 · GROK HYBRID</span><h2>上下文溢出安全降级</h2></div><p>遭遇 SDK context compaction 且满足安全条件时，无缝切换至<strong>备用 Responses 端点</strong>；会话自动锁定该路由。</p></section>
   <footer class="footer"><a href="https://github.com/ifwu/cursor2response">github.com/ifwu/cursor2response</a><span class="boundary">本地运行网关 · 云端提供模型</span></footer>
 </main>
 </body>

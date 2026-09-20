@@ -5,7 +5,7 @@
 <text x="155" y="68" font-size="23" fill="#142F3A" font-weight="600">cursor2response</text>
 <text x="1512" y="67" font-size="17" fill="#56686D" font-weight="500" text-anchor="end">RUNTIME FLOW / 02</text>
 <text x="88" y="169" font-size="53" fill="#142F3A" font-weight="700">Many requests. One warm Agent.</text>
-<text x="90" y="218" font-size="24" fill="#56686D" font-weight="400">Tool results continue the same Run. Native steer delivers new input while it runs.</text>
+<text x="90" y="218" font-size="24" fill="#56686D" font-weight="400">Tool results complete in-run. Native steer injects instructions in-flight.</text>
 <rect x="88" y="278" width="914" height="396" rx="24" fill="#FFFFFF" stroke="#D6DED7" stroke-width="2"/>
 <text x="120" y="320" font-size="19" fill="#087F78" font-weight="600">01  KEEP THE SESSION</text>
 <text x="241" y="367" font-size="24" fill="#142F3A" font-weight="600" text-anchor="middle">Harness</text>
@@ -34,7 +34,7 @@
 <path d="M 1082 392 V 431" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M 1075 421 L 1082 431 L 1089 421" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="1110" y="423" font-size="22" fill="#142F3A" font-weight="500">Confirmed compaction</text>
-<text x="1110" y="455" font-size="21" fill="#56686D" font-weight="400">Switch only when safe</text>
+<text x="1110" y="455" font-size="21" fill="#56686D" font-weight="400">Failover before public output</text>
 <path d="M 1082 472 V 511" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M 1075 501 L 1082 511 L 1089 501" fill="none" stroke="#BE592B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="1110" y="509" font-size="22" fill="#142F3A" font-weight="500">Configured Responses</text>
@@ -45,7 +45,7 @@
 <rect x="88" y="710" width="1424" height="96" rx="22" fill="#142F3A"/>
 <circle cx="124" cy="755" r="8" fill="#70D7BB"/>
 <text x="150" y="765" font-size="27" fill="#FFFFFF" font-weight="600">03  Trace Viewer</text>
-<text x="469" y="765" font-size="25" fill="#C9DCDA" font-weight="400">Agent / Run · tool roundtrips · why replay · route changes</text>
+<text x="469" y="765" font-size="25" fill="#C9DCDA" font-weight="400">Agent / Run · tool calls · replay causes · route changes</text>
 <text x="88" y="864" font-size="19" fill="#56686D" font-weight="400">github.com/ifwu/cursor2response</text>
 <text x="1512" y="864" font-size="17" fill="#56686D" font-weight="500" text-anchor="end">LOCAL GATEWAY · CLOUD MODELS</text>
 </g>

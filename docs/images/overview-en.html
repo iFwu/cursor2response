@@ -26,20 +26,20 @@ html[lang="zh-CN"] .hero p{font-size:37px}html[lang="zh-CN"] .continuity h2{font
   <header class="hero"><h1>cursor2response</h1><p>Local Cursor gateway. <strong>Responses first.</strong></p></header>
   <div class="body-grid">
     <section class="continuity">
-      <p class="section-label">Conversation continuity</p><h2>Keep the conversation warm.</h2>
+      <p class="section-label">Session Continuity</p><h2>Reuse one warm Agent instance across turns.</h2>
       <div class="pipeline" aria-label="Codex and OpenClaw through Responses API to one warm SDK Agent">
         <div class="node"><span class="eyebrow">Harness</span><strong>Codex / OpenClaw</strong></div><span class="arrow" aria-hidden="true">→</span>
         <div class="node"><span class="eyebrow">Public interface</span><strong>Responses API</strong></div><span class="arrow" aria-hidden="true">→</span>
         <div class="node"><span class="eyebrow"><span class="warm-dot" aria-hidden="true"></span>Session reuse</span><strong>One warm SDK Agent</strong></div>
       </div>
-      <div class="tool-loop"><div class="loop-lines"><span><span class="direction" aria-hidden="true">←</span>tool call → harness executes</span><span><span class="direction" aria-hidden="true">→</span>tool result → SDK continues</span></div><div class="same-run"><small>Tool roundtrips stay on</small><strong>same Run</strong></div></div>
+      <div class="tool-loop"><div class="loop-lines"><span><span class="direction" aria-hidden="true">←</span>tool call → harness executes</span><span><span class="direction" aria-hidden="true">→</span>tool result → SDK continues</span></div><div class="same-run"><small>Tool roundtrips complete in</small><strong>same Run</strong></div></div>
     </section>
     <aside class="support-stack">
-      <section class="trace"><div class="support-label">Follow the execution</div><h2>A trace you can read.</h2><p>See Agent and Run lanes, tool activity, route changes — and why a replay happened.</p></section>
-      <section class="steer"><h2>Native steer, while it runs.</h2><p>New input joins the active Run with explicit acknowledgement.</p></section>
+      <section class="trace"><div class="support-label">Execution observability</div><h2>Readable end-to-end trace.</h2><p>Track Agent and Run lanes, tool activity, route changes, and root causes for replays.</p></section>
+      <section class="steer"><h2>In-flight native steer</h2><p>Inject new instructions directly into the active Run without resetting state.</p></section>
     </aside>
   </div>
-  <section class="fallback"><div><span class="flag">OPTIONAL · GROK HYBRID</span><h2>Overflow fallback</h2></div><p>Confirmed context compaction can switch to a <strong>configured Responses endpoint</strong> when safe. The session then keeps that route.</p></section>
+  <section class="fallback"><div><span class="flag">OPTIONAL · GROK HYBRID</span><h2>Overflow safe failover</h2></div><p>On SDK context compaction, safely fail over to a <strong>configured Responses endpoint</strong> before public output. The session locks to that route.</p></section>
   <footer class="footer"><a href="https://github.com/ifwu/cursor2response">github.com/ifwu/cursor2response</a><span class="boundary">Local gateway · Cloud models</span></footer>
 </main>
 </body>

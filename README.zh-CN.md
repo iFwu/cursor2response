@@ -1,18 +1,18 @@
 # cursor2response
 
-**复用 Cursor 会话，在同一个 Run 中续接工具调用，让执行过程清晰可见。**
+**复用 Cursor 会话，在同一 Run 内续接工具调用，让执行链路清晰可见。**
 
 [English](README.md) · 简体中文
 
-面向 OpenAI Responses API 客户端的本地 Cursor SDK 网关，内置 Trace Viewer。经过 **Codex 和 OpenClaw** 日常使用中的持续验证，重点解决会话复用、工具续接和执行过程可观测性。
+面向 **Codex 与 OpenClaw** 等客户端的本地 Cursor SDK 网关，专注 OpenAI Responses 协议，内置 Trace Viewer。核心支持长会话复用、同一 Run 内工具续接与执行全链路可视化。
 
 ![cursor2response 功能概览](docs/images/overview-zh-CN.png)
 
-网关运行在本机，模型推理仍使用 Cursor 服务，需要你自己的 Cursor API Key。本项目独立维护，非 Cursor 官方产品。
+网关运行在本机，模型推理依托 Cursor 服务，需提供个人 Cursor API Key。本项目独立维护，非 Cursor 官方产品。
 
 ## 快速开始
 
-安装 Docker Engine 和 Docker Compose，然后执行：
+环境要求：Docker Engine 与 Docker Compose。
 
 ```bash
 git clone https://github.com/ifwu/cursor2response.git
@@ -21,7 +21,7 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-将生成的随机值填入 `.env` 的 `CURSOR_SDK_BRIDGE_TOKEN`，用于内部 Bridge 调用鉴权；它与 Cursor API Key 是两个独立凭据。客户端可以自行提供 Cursor Key，也可以在 `.env` 中设置 `CURSOR_API_KEY`，作为单用户部署的默认 Key。
+将生成的随机字符串填入 `.env` 的 `CURSOR_SDK_BRIDGE_TOKEN`（用于网关内部 Sidecar 与 Bridge 间鉴权）。客户端可各自在请求头携带 Cursor Key；亦可在 `.env` 中指定 `CURSOR_API_KEY` 作为单用户部署的默认 Key。
 
 ```bash
 docker compose up -d --build
@@ -30,26 +30,26 @@ curl --fail http://127.0.0.1:6718/health
 curl --fail http://127.0.0.1:8100/health
 ```
 
-| 组件 | 地址 |
-| --- | --- |
-| API base URL | `http://127.0.0.1:6718/v1` |
-| Trace Viewer | `http://127.0.0.1:8100` |
-| SDK Bridge | 仅 Compose 内部网络可访问 |
+| 服务 | 地址 | 访问范围 |
+| --- | --- | --- |
+| API Base URL | `http://127.0.0.1:6718/v1` | 本地回环（127.0.0.1） |
+| Trace Viewer | `http://127.0.0.1:8100` | 本地回环（127.0.0.1） |
+| SDK Bridge | 内部端口 | 仅 Compose 内部网络 |
 
-在客户端中填写上述 API base URL、你的 Cursor API Key，选择 **Responses** 模式，并使用 `/v1/models` 返回的 model ID：
+列出当前账号可用的模型 ID：
 
 ```bash
 curl --fail http://127.0.0.1:6718/v1/models \
   -H "Authorization: Bearer $CURSOR_API_KEY"
 ```
 
-两个对外端口默认只绑定 localhost。请保管好 `.env`。Viewer 没有用户鉴权，可能展示对话内容；如果配置了默认 Cursor Key，能够访问 API 的调用者就能使用该凭据。
-
-配置、源码运行、升级和备份见[本地部署指南](docs/runbooks/local-deployment.md)。镜像由源码在本地构建，项目不提供托管网关或预构建发布镜像。
+> **安全提示**：对外端口默认仅绑定 `127.0.0.1`。Trace Viewer 无内置鉴权，请勿直接暴露至公网；配置了默认 `CURSOR_API_KEY` 时，任何可访问 API 的客户端均可消耗该配额。完整配置与持久化备份见[本地部署指南](docs/runbooks/local-deployment.md)。
 
 ## 接入客户端
 
-将 `MODEL_ID` 替换为 `/v1/models` 返回的模型 ID。客户端进程的环境中需要有 `CURSOR_API_KEY`；网关的 `.env` 不会自动配置另一个客户端进程。
+将下方配置中的 `MODEL_ID` 替换为 `/v1/models` 返回的实际模型 ID。
+
+在运行客户端的环境中设置 `CURSOR_API_KEY`：
 
 ```bash
 export CURSOR_API_KEY="your-cursor-api-key"
@@ -57,7 +57,7 @@ export CURSOR_API_KEY="your-cursor-api-key"
 
 ### Codex
 
-将以下设置合并到 `~/.codex/config.toml`，根级设置应放在 TOML table 之前：
+将以下配置合并至 `~/.codex/config.toml`（顶层配置需置于任何 `[table]` 之前）：
 
 ```toml
 model_provider = "cursor2response"
@@ -70,11 +70,11 @@ wire_api = "responses"
 env_key = "CURSOR_API_KEY"
 ```
 
-在已设置 `CURSOR_API_KEY` 的终端运行 `codex`，无需预先创建 named profile。
+直接在终端运行 `codex` 即可，无需指定 profile。
 
 ### OpenClaw
 
-将以下内容合并到 `~/.openclaw/openclaw.json`，替换两处 `MODEL_ID`：
+将以下配置合并至 `~/.openclaw/openclaw.json`：
 
 ```json5
 {
@@ -97,13 +97,11 @@ env_key = "CURSOR_API_KEY"
 }
 ```
 
-如果已有 `agents.defaults.models` 模型 allowlist，需要将 `cursor2response/MODEL_ID` 加入其中。Key 必须在实际运行 Gateway 的进程环境中可用；在另一个终端执行 `export` 不会改变已运行服务的环境。按现有 OpenClaw 服务管理方式使配置生效。
+> **提示**：若配置了 `agents.defaults.models` 白名单，需同步加入 `cursor2response/MODEL_ID`。实际使用建议根据模型特性合理配置 `contextWindow` 与 `agents.defaults.contextTokens`，详见[上下文预算说明](docs/specs/grok-hybrid.md#client-context-budgets)。
 
-示例未指定上下文限制。默认值不等于实测 SDK 上限；请根据所选模型和配置的路由设置 `contextWindow` 与 `agents.defaults.contextTokens`，说明见[上下文预算](docs/specs/grok-hybrid.md#client-context-budgets)。
+### Claude Code（兼容模式）
 
-### Claude Code（best effort）
-
-安装 Claude Code 后，选用 `/v1/models` 返回的可用 Claude 模型 ID。这里的 base URL 不带 `/v1`：
+启动时指定本地端点（Base URL 不带 `/v1`）：
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:6718 \
@@ -111,64 +109,65 @@ ANTHROPIC_API_KEY="$CURSOR_API_KEY" \
 claude --model MODEL_ID
 ```
 
-此方式使用 best-effort Anthropic Messages 适配。可在 Claude Code 的 `/status` 中确认 base URL 和生效的凭据；持久化设置见 [Claude Code 网关配置](https://code.claude.com/docs/en/llm-gateway-connect)。
+此路径通过 Anthropic Messages 协议做最佳努力适配。可在 Claude Code 内输入 `/status` 核对端点状态；持久化配置见 [Claude Code 网关文档](https://code.claude.com/docs/en/llm-gateway-connect)。
 
-## 看清一次会话的执行过程
+## Trace 链路可视化
 
-Trace Viewer 将同一 session 的请求、Agent lanes、SDK Runs、工具调用和路由变化串起来，直接查看上下文复用、replay 和工具续接，无需逐条拼接原始日志。
+Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生命周期、工具调用及路由决策整合为统一时间线，直观呈现上下文复用与工具续接，告别低效的日志翻找。
 
 ![Trace Viewer 会话时间线](docs/images/trace-timeline.png)
 
-识别出的 Codex/OpenClaw harness 上下文会折叠为次级条目，让用户请求和工具活动更容易找到。
+对 Codex / OpenClaw 注入的环境预设与元数据，时间线会自动折叠为次级条目，突出真实用户意图与工具交互。
 
-Runtime 页面从 Bridge 查询当前 Agent 和待处理任务。历史 trace 用来解释已经发生的过程，runtime snapshot 用来确认此刻仍在运行的状态。
+切换至 Runtime 视图可实时掌握 Bridge 内存中的活跃 Agent、挂起 Run 及租约状态：
 
 ![Trace Viewer 实时运行状态](docs/images/trace-runtime.png)
 
-截图使用合成演示数据。实时会话和 trace 检查方法见 [Trace Viewer 指南](docs/runbooks/trace-viewer.md)。
+截图基于合成演示数据。排查流程与日志规格参见 [Trace Viewer 指南](docs/runbooks/trace-viewer.md)。
 
-## 主要特性
+## 核心特性
 
-| 能力 | 实际作用 |
+| 特性 | 说明 |
 | --- | --- |
-| **会话复用** | 兼容的后续轮次复用 SDK Agent，只发送缺失的输入后缀，为 prompt cache 复用保留条件。 |
-| **同一 Run 内工具续接** | 后续 HTTP 请求送回的工具结果直接完成原 SDK Run 的回调，保持 SDK agent loop 连续。 |
-| **Native steer** | 符合条件的新指令通过 `Run.steer()` 进入正在执行的 Run，并按顺序处理、确认送达。 |
-| **Trace Viewer** | 在本地页面查看会话历史、工具活动、上下文 replay、provider 切换和当前 runtime 归属。 |
-| **上下文溢出 fallback** | 显式启用 `grok-hybrid` 后，确认 SDK context compaction 时可转到配置的 OpenAI-compatible Responses endpoint 继续。 |
-| **明确的执行边界** | 保留 assistant commentary 与 final 阶段；取消操作指向所属执行；干净结束的 Agent 可在重启后恢复。 |
+| **会话复用** | 轮次间自动复用 SDK Agent，仅增量发送历史后缀，最大化保留服务端 prompt cache 机会。 |
+| **同一 Run 内工具续接** | 客户端返回的工具结果直接结算原 SDK Run 挂起的回调，维持 SDK 内部 agent loop 完整。 |
+| **Native Steer** | 运行中的 Run 支持通过 `Run.steer()` 顺序接入新指令，无需中断当前执行。 |
+| **Trace Viewer** | 本地可视化面板，直观审计会话历史、上下文重放、工具耗时与运行时归属。 |
+| **上下文溢出 Fallback** | 启用 `grok-hybrid` 后，遭遇 SDK context compaction 时无缝切换至配置的外部 Responses 端点。 |
+| **原生系统提示词扩展** | 请求支持 `system_prompt` 参数，可自定义或完全剥离 Cursor 默认系统提示词。 |
+| **清晰的执行边界** | 区分过程思考与最终回复；支持精准关联取消；重启后支持恢复已干净完结的 Agent。 |
 
 ![会话与 runtime 流程](docs/images/runtime-flow-zh-CN.png)
 
-一次 HTTP 请求不等于一次 SDK Run：同一个 Run 可以跨越多轮工具请求。后续用户轮次可以在原 Agent 上开启新 Run，也可以 steer 符合条件的活跃执行。复用需要稳定且兼容的 session identity 和对话历史；明确的恢复边界仍可能触发完整 replay。缓存行为由 provider 决定，项目不承诺固定命中率。
+### 核心机制
 
-Fallback 有明确范围：选择 `grok-hybrid` 或 `grok-hybrid-fast` 并配置 provider 后才会启用。只有确认 SDK context compaction 才触发，普通错误不会触发。当前请求立即 fallback 还需要确认清理完成且尚未输出公开内容，后续请求则沿已记录的路由继续。详见[路由契约](docs/specs/grok-hybrid.md)。
-
-Grok 也可通过模型 ID 选择速度：`grok-hybrid-fast` 使用 Fast SDK 路由并保留已配置的溢出 fallback；`cursor-grok-fast` 直接走 Cursor。底层请求还可使用 `service_tier` 等 Fast 参数，显式参数的优先级见[路由契约](docs/specs/grok-hybrid.md#identity-and-state)。
-
-Responses 还支持原生 `system_prompt` 扩展：非空字符串替换主 Agent 的 Cursor system prompt；省略或设为 `false` 使用 SDK 默认值。覆盖需要账号支持，不适用于 Grok hybrid 路由；复用同一 Agent 的各次请求应保持该值一致。详见[系统提示词契约](docs/specs/responses-agent-context-affinity.md#native-system-prompt)。
+- **请求与 Run 解耦**：一次 HTTP 请求不等于一次 SDK Run。多次工具往返均在同一 Run 内闭环，避免每次工具返回都重新组装模型上下文。
+- **多轮复用与 Steering**：新轮次可在同一 Agent 上开启新 Run；若上一次执行尚未结束，新指令可通过 native steer 机制排队注入。
+- **前缀匹配与重放保护**：复用严格基于对话历史的前缀哈希比对。若检测到客户端对历史进行了总结压缩或手动修改，网关自动回退为全量重放，保障上下文一致性。
+- **Grok Hybrid 路由策略**：使用 `grok-hybrid` 或 `grok-hybrid-fast` 时，仅在确认触发 SDK context compaction 且当前请求尚未对外输出内容时执行安全降级，此后该会话固定沿外部端点继续。详见[路由契约](docs/specs/grok-hybrid.md)。
+- **原生 `system_prompt` 覆盖**：Responses 请求可传入非空字符串直接替换 Cursor SDK 默认系统提示词，或传 `false` 使用默认配置（需账号权限支持）。详见[系统提示词契约](docs/specs/responses-agent-context-affinity.md#native-system-prompt)。
 
 ## 项目缘起
 
-本项目源于 [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api) 的 fork，起因是[上游 issue #1](https://github.com/NGLSG/Cursor2API/issues/1) 中的缓存命中与会话复用问题。最初的目标是避免每次客户端请求都重建 SDK 上下文，并让工具往返留在 SDK 原有执行中。
+本项目最初源自对 [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api) 的 fork，旨在解决[上游 issue #1](https://github.com/NGLSG/Cursor2API/issues/1) 提出的核心痛点：避免每次客户端请求都全量重建 SDK 上下文，并使多轮工具交互能够维持在同一执行生命周期中。
 
-随后在 Codex 和 OpenClaw 中持续自用和实证验证，逐步完善了工具续接、steering、取消、transcript 对齐和 trace 跟踪。项目在维护者的日常工作流中稳定下来后，作为以 Responses 为主、有独立 runtime 和协议契约的项目开源分享。
+在深度适配 Codex 与 OpenClaw 的工程实践中，项目进一步补齐了单 Run 工具续接、原生指令注入（steering）、精准取消控制、对话历史严格对齐以及全链路 Trace Viewer 观测系统，最终演进为一个拥有独立运行时与严密协议契约的 Responses 本地网关。
 
-## 兼容范围与边界
+## 兼容范围与运行约束
 
-- **主要 API：** `/v1/responses`，包括流式响应、客户端工具、工具结果续接和 session affinity。Codex 与 OpenClaw 是主要真实客户端验收路径。
-- **Best effort：** `/v1/chat/completions`、`/v1/messages` 和 `/v1/messages/count_tokens`，不声明完整协议兼容。
-- **Runtime：** 所有服务统一使用 Node.js 24 LTS，支持本地 Docker Compose 或源码运行。Docker 整套运行路径已在 Linux amd64 验证，其他平台尚未验收。
-- **对话历史：** 客户端需保留要求的公开历史，包括工具调用、结果和 assistant phases；`previous_response_id` 不能代替这些历史。
-- **重启行为：** Compose 持久化 SDK checkpoints 和 Bridge 状态；干净结束的 Agent 可以恢复，活跃 Run 和待返回的工具回调不会跨进程重启保留。`docker compose down` 保留 volumes，`docker compose down -v` 会删除它们。
-- **上下文计量：** token 估算不是权威 SDK context 测量，单次长 prompt 成功不能证明多轮对话的安全上下文上限。
-- **Trace 隐私：** 日志与状态可能包含 prompt、工具参数及结果，分享前需检查并脱敏。
+- **核心协议：** `/v1/responses`，全面支持流式传输、客户端工具定义、工具结果连续回传及会话亲和性。Codex 与 OpenClaw 为核心验收标准。
+- **兼容端点（Best Effort）：** `/v1/chat/completions`、`/v1/messages` 及 `/v1/messages/count_tokens` 仅作基础功能适配，不承诺所有上游参数行为完全对齐。
+- **运行时：** 全链路采用 Node.js 24 LTS，支持 Docker Compose 或源码运行（Docker 镜像在 Linux amd64 充分验证）。
+- **客户端历史要求：** 客户端必须自行维护并传回完整的上下文历史（包括工具调用、返回结果与阶段标注）；`previous_response_id` 不能替代历史内容。
+- **状态持久化：** Docker Compose 持久化 SDK checkpoint 与 Bridge 状态索引。正常退出的 Agent 重启后可无缝恢复，但运行中的任务与待返回的工具回调无法跨进程恢复。
+- **上下文计量：** 网关返回的 token 用量为基于字符的估算值，不代表 Cursor SDK 内部真实窗口占用；单次长 prompt 成功不代表多轮交互的安全上限。
+- **Trace 数据脱敏：** 追踪日志会包含实际 prompt 及工具出入参，对外分享日志文件前请务必审查脱敏。
 
-具体兼容范围见[协议支持说明](docs/specs/protocol-support.md)。
+详细协议支持清单参见[协议支持说明](docs/specs/protocol-support.md)。
 
-## 从源码运行
+## 源码运行
 
-安装 Node.js 24 LTS 和 npm 后执行：
+若需直接通过 Node.js 24 LTS 与 npm 运行：
 
 ```bash
 npm ci
@@ -177,18 +176,18 @@ node server.mjs start
 node server.mjs status
 ```
 
-Launcher 是轻量的 API + Bridge 启动方式，会生成自己的内部 token，并将进程状态和 launcher 日志放在 `~/.cursor2response`。使用 `node server.mjs stop` 停止。单独启动 Viewer 不会自动发现该 token；需要完整 API + Bridge + Viewer 时，请使用 Docker Compose 或[三终端源码部署](docs/runbooks/local-deployment.md#direct-source-execution)，不要混用 launcher。
+`server.mjs` 提供轻量级的 API + Bridge 本地后台守护，内部 Token 与进程状态存于 `~/.cursor2response`，使用 `node server.mjs stop` 停止。
 
-API 启动后，在已导出 `CURSOR_API_KEY` 的终端中，可从源码目录以表格查看模型：
+启动后可在终端直接列出可用模型表格：
 
 ```bash
 node server.mjs models
 node server.mjs models --json
 ```
 
-API 使用其他端口时附加 `--port PORT`。
+> **注意**：独立启动的 Trace Viewer 无法自动感知 `server.mjs` 的动态 Token。如需同时使用 API、Bridge 与 Trace Viewer，建议使用 Docker Compose 或参考[三终端源码部署说明](docs/runbooks/local-deployment.md#direct-source-execution)。
 
-## 开发与文档
+## 开发与测试
 
 ```bash
 npm run typecheck
@@ -199,7 +198,7 @@ npm run trace:viewer:test
 npm run trace:viewer:build
 ```
 
-从[文档索引](docs/README.md)和[仓库约定](AGENTS.md)开始。协议变更应同步更新对应 spec 和回归覆盖。
+从[文档索引](docs/README.md)和[仓库约定](AGENTS.md)开始。协议变更应同步更新对应 spec 和回归测试覆盖。
 
 ## 致谢 · Credits
 

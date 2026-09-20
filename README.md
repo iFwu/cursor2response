@@ -4,15 +4,15 @@
 
 English · [简体中文](README.zh-CN.md)
 
-A local Cursor SDK gateway for clients using the OpenAI Responses API, with a built-in Trace Viewer. Developed through daily use with **Codex and OpenClaw**, it focuses on conversation reuse, reliable tool continuation, and observable execution.
+A local Cursor SDK gateway built for **Codex and OpenClaw**, focused on the OpenAI Responses API, in-run tool continuation, and transparent execution tracing.
 
 ![cursor2response overview](docs/images/overview-en.png)
 
-The gateway runs on your machine; model inference uses Cursor services and requires your own Cursor API key. This is an independently maintained project, not an official Cursor product.
+The gateway runs locally; model inference relies on Cursor services and requires your own Cursor API key. Independently maintained and not an official Cursor product.
 
 ## Quick start
 
-Install Docker Engine with Docker Compose, then:
+Prerequisites: Docker Engine and Docker Compose.
 
 ```bash
 git clone https://github.com/ifwu/cursor2response.git
@@ -21,7 +21,7 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-Set `CURSOR_SDK_BRIDGE_TOKEN` in `.env` to the generated random value. This authenticates internal Bridge calls and is separate from your Cursor API key. Clients can supply their own Cursor key; optionally set `CURSOR_API_KEY` in `.env` as a single-user default.
+Set `CURSOR_SDK_BRIDGE_TOKEN` in `.env` to the generated random string (authenticates internal communication between Sidecar and Bridge). Clients can provide their own Cursor key per request, or you can optionally set `CURSOR_API_KEY` in `.env` as a single-user default.
 
 ```bash
 docker compose up -d --build
@@ -30,26 +30,26 @@ curl --fail http://127.0.0.1:6718/health
 curl --fail http://127.0.0.1:8100/health
 ```
 
-| Component | Address |
-| --- | --- |
-| API base URL | `http://127.0.0.1:6718/v1` |
-| Trace Viewer | `http://127.0.0.1:8100` |
-| SDK Bridge | Internal Compose network only |
+| Service | Address | Accessibility |
+| --- | --- | --- |
+| API Base URL | `http://127.0.0.1:6718/v1` | Loopback only (127.0.0.1) |
+| Trace Viewer | `http://127.0.0.1:8100` | Loopback only (127.0.0.1) |
+| SDK Bridge | Internal port | Compose network only |
 
-Configure your client to use the API base URL, **Responses** mode, your Cursor API key, and a model ID returned by `/v1/models`:
+List models available to your account:
 
 ```bash
 curl --fail http://127.0.0.1:6718/v1/models \
   -H "Authorization: Bearer $CURSOR_API_KEY"
 ```
 
-Both published ports bind to localhost by default. Keep `.env` private. The Viewer has no user authentication and may display conversation content; a configured default Cursor key is available to anyone who can reach the API.
-
-See [local deployment](docs/runbooks/local-deployment.md) for configuration, source execution, updates, and backups. Images are built locally from source; no hosted gateway or prebuilt release image is provided.
+> **Security Note**: Published ports bind strictly to `127.0.0.1` by default. The Trace Viewer has no built-in authentication—do not expose it to untrusted networks. If a default `CURSOR_API_KEY` is set in `.env`, any client reaching the API can consume its quota. For configuration, updates, and volume backups, see the [local deployment guide](docs/runbooks/local-deployment.md).
 
 ## Connect a client
 
-Use a model ID from `/v1/models` in place of `MODEL_ID`. The client process must have `CURSOR_API_KEY` in its environment; the gateway's `.env` does not configure a separate client process.
+Replace `MODEL_ID` below with a model ID returned by `/v1/models`.
+
+Ensure `CURSOR_API_KEY` is set in your client's shell environment:
 
 ```bash
 export CURSOR_API_KEY="your-cursor-api-key"
@@ -57,7 +57,7 @@ export CURSOR_API_KEY="your-cursor-api-key"
 
 ### Codex
 
-Merge these settings into `~/.codex/config.toml`, keeping root settings above any TOML tables:
+Add this configuration to `~/.codex/config.toml` (place root settings before any `[table]` headers):
 
 ```toml
 model_provider = "cursor2response"
@@ -70,11 +70,11 @@ wire_api = "responses"
 env_key = "CURSOR_API_KEY"
 ```
 
-Run `codex` from a terminal with `CURSOR_API_KEY` set. No named profile is required.
+Run `codex` directly from the terminal without creating a named profile.
 
 ### OpenClaw
 
-Merge this into `~/.openclaw/openclaw.json`; replace both occurrences of `MODEL_ID`:
+Merge this into `~/.openclaw/openclaw.json`:
 
 ```json5
 {
@@ -97,13 +97,11 @@ Merge this into `~/.openclaw/openclaw.json`; replace both occurrences of `MODEL_
 }
 ```
 
-If you already use an `agents.defaults.models` allowlist, add `cursor2response/MODEL_ID` there. Make the key available to the actual Gateway process; exporting it in a different terminal does not update a running service. Apply the configuration through your normal OpenClaw service workflow.
+> **Tip**: If you configure an `agents.defaults.models` allowlist, add `cursor2response/MODEL_ID` to it. Configure `contextWindow` and `agents.defaults.contextTokens` according to your model, as detailed in [context budgets](docs/specs/grok-hybrid.md#client-context-budgets).
 
-The example leaves context limits unset. Defaults are not measured SDK limits: choose `contextWindow` and `agents.defaults.contextTokens` for your model and configured route, as described in [context budgets](docs/specs/grok-hybrid.md#client-context-budgets).
+### Claude Code (compatibility mode)
 
-### Claude Code (best effort)
-
-With Claude Code installed, use a Claude model ID available through `/v1/models`. Its base URL excludes `/v1`:
+Launch with the local base URL (without `/v1`):
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:6718 \
@@ -111,64 +109,65 @@ ANTHROPIC_API_KEY="$CURSOR_API_KEY" \
 claude --model MODEL_ID
 ```
 
-This uses the Anthropic Messages adapter, which remains best effort. Check `/status` in Claude Code to confirm the base URL and active credential; see [Claude Code gateway configuration](https://code.claude.com/docs/en/llm-gateway-connect) for persistent settings.
+This uses the best-effort Anthropic Messages adapter. Check `/status` inside Claude Code to verify endpoint connectivity; see [Claude Code gateway configuration](https://code.claude.com/docs/en/llm-gateway-connect) for persistent setups.
 
-## Trace your conversation
+## Execution tracing
 
-The Viewer connects a session's requests, Agent lanes, SDK Runs, tool calls, and route changes. It makes context reuse, replay, and tool continuation visible without piecing together raw logs.
+The Trace Viewer correlates requests, Agent lanes, SDK Runs, tool activity, and routing decisions across a session into a single timeline, making context reuse and replays immediately visible without manual log hunting.
 
 ![Trace Viewer session timeline](docs/images/trace-timeline.png)
 
-Recognized Codex/OpenClaw harness context is collapsed into secondary entries, keeping the user request and tool activity easy to find.
+Recognized Codex and OpenClaw harness wrappers are collapsed into secondary items, keeping user intents and tool interactions front and center.
 
-The runtime view queries the Bridge for its current Agents and pending work. Historical traces explain what happened; the runtime snapshot shows what is still active.
+Switch to the Runtime tab to inspect in-memory Bridge state, including active Agents, parked Runs, and lease status:
 
 ![Trace Viewer runtime state](docs/images/trace-runtime.png)
 
-Screenshots use synthetic demonstration data. See the [Trace Viewer guide](docs/runbooks/trace-viewer.md) for live sessions and trace inspection.
+Screenshots use synthetic demo data. For session inspection and live log workflows, see the [Trace Viewer guide](docs/runbooks/trace-viewer.md).
 
-## What it does well
+## Capabilities
 
-| Capability | What you get |
+| Capability | Summary |
 | --- | --- |
-| **Conversation reuse** | Compatible follow-up turns reuse an SDK Agent and send the missing input suffix, preserving the opportunity for prompt-cache reuse. |
-| **Same-Run tool continuation** | Tool results arriving in later HTTP requests settle callbacks on the existing SDK Run, keeping the SDK's agent loop intact. |
-| **Native steering** | Eligible new instructions reach an active Run through `Run.steer()`, with delivery acknowledgments and ordered handling. |
-| **Trace Viewer** | Inspect session history, tool activity, context replay, provider changes, and current runtime ownership from one local UI. |
-| **Context-overflow fallback** | Opt-in `grok-hybrid` routing can continue through a configured OpenAI-compatible Responses endpoint after confirmed SDK context compaction. |
-| **Clear execution boundaries** | Assistant commentary and final phases stay distinct; cancellation targets the owning execution, and clean completed Agents can resume after restart. |
+| **Session reuse** | Follow-up turns reuse the SDK Agent, sending only the missing suffix to maximize provider prompt-cache hits. |
+| **In-run tool continuation** | Tool results settle pending callbacks on the active SDK Run, keeping the internal agent loop intact. |
+| **Native steering** | Inject new instructions into an in-progress Run via `Run.steer()` with ordered handling and delivery receipts. |
+| **Trace Viewer** | Local visual interface to inspect session history, context replays, tool latencies, and runtime ownership. |
+| **Context-overflow fallback** | Opt-in `grok-hybrid` routes to a configured Responses endpoint when SDK context compaction occurs. |
+| **Native system prompt** | Pass `system_prompt` on Responses requests to replace or strip the default Cursor system prompt. |
+| **Clean execution boundaries** | Intermediate commentary and final answers remain distinct; cancellations target the owning execution; clean Agents resume across restarts. |
 
 ![Conversation and runtime flow](docs/images/runtime-flow-en.png)
 
-An HTTP request is not an SDK Run: one Run can span multiple tool round trips. A later user turn can start a new Run on the same Agent, or steer eligible active work. Reuse depends on a compatible session identity and conversation history; explicit recovery boundaries can still require full replay. Cache behavior remains provider-controlled, so no fixed hit rate is promised.
+### How it works
 
-Fallback is deliberately scoped: selecting `grok-hybrid` or `grok-hybrid-fast` and configuring its provider enables it. Confirmed SDK context compaction triggers the policy; ordinary errors do not. Immediate fallback requires confirmed cleanup and no public output yet, and subsequent requests follow the recorded route. See the [routing contract](docs/specs/grok-hybrid.md).
-
-Grok model IDs also select speed: `grok-hybrid-fast` uses the Fast SDK route with configured overflow fallback; `cursor-grok-fast` goes directly through Cursor. Low-level requests can use Fast parameters, including `service_tier`; explicit parameter precedence is described in the [routing contract](docs/specs/grok-hybrid.md#identity-and-state).
-
-Responses also supports a native `system_prompt` extension: a non-empty string replaces the main Agent's Cursor system prompt, while omission or `false` uses the SDK default. This requires account support, is unavailable on Grok hybrid routes, and must stay consistent across requests reusing an Agent. See the [system prompt contract](docs/specs/responses-agent-context-affinity.md#native-system-prompt).
+- **Decoupled Requests and Runs**: An HTTP request is not an SDK Run. Multiple tool round trips complete inside the same active Run, avoiding redundant context reconstruction.
+- **Multi-turn Reuse and Steering**: Subsequent user turns can start a new Run on the existing Agent, or inject prompt updates into an active Run via native steering.
+- **Prefix-matched Replays**: Reuse relies on an exact hash prefix match of conversation history. If client-side compaction or edits diverge from the accepted transcript, the gateway safely performs a full replay.
+- **Grok Hybrid Routing**: Selecting `grok-hybrid` or `grok-hybrid-fast` enables fallback. Failover triggers only upon confirmed SDK compaction before public output begins, locking that route for the rest of the session. See the [routing contract](docs/specs/grok-hybrid.md).
+- **Native System Prompt Override**: Pass a non-empty `system_prompt` string to replace the Cursor system prompt, or pass `false` for the SDK default (requires account support). See the [system prompt contract](docs/specs/responses-agent-context-affinity.md#native-system-prompt).
 
 ## Why this project exists
 
-This began as a fork of [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api), following the cache-hit and conversation-reuse problem in [upstream issue #1](https://github.com/NGLSG/Cursor2API/issues/1). The original goal was to stop rebuilding SDK context for each client request and keep tool round trips inside the SDK's existing execution.
+This project originated as a fork of [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api) to address the core issue discussed in [upstream issue #1](https://github.com/NGLSG/Cursor2API/issues/1): preventing SDK context reconstruction on every turn and keeping tool interactions inside a single execution lifecycle.
 
-Extensive practical use with Codex and OpenClaw led to deeper work on tool continuation, steering, cancellation, transcript reconciliation, and tracing. After becoming dependable in the maintainer's daily workflows, it is being shared as a Responses-focused project with its own runtime and protocol contracts.
+Through intensive real-world use with Codex and OpenClaw, it evolved to incorporate in-run tool continuation, native steering, cancellation controls, strict transcript prefix matching, and full-chain trace visualization—becoming an independent Responses gateway with dedicated runtime and protocol specifications.
 
 ## Compatibility and limits
 
-- **Primary API:** `/v1/responses`, including streaming, client tools, tool-result continuation, and session affinity. Codex and OpenClaw are the main real-client validation paths.
+- **Primary API:** `/v1/responses`, including streaming, client tools, tool-result continuation, and session affinity. Codex and OpenClaw serve as the main acceptance paths.
 - **Best effort:** `/v1/chat/completions`, `/v1/messages`, and `/v1/messages/count_tokens`. These endpoints do not claim full protocol conformance.
-- **Runtime:** Node.js 24 LTS for every service, through local Docker Compose or source execution. The Docker stack has been exercised on Linux amd64; other platforms are not yet validated.
-- **Conversation history:** clients must preserve the required public history, including tool calls, results, and assistant phases. `previous_response_id` does not replace that history.
-- **Restart behavior:** Compose persists SDK checkpoints and Bridge state. Clean completed Agents may resume; active Runs and pending tool callbacks do not survive process replacement. `docker compose down` retains volumes; `docker compose down -v` deletes them.
-- **Context accounting:** token estimates are not authoritative SDK context measurements. A successful long prompt does not establish a safe multi-turn context ceiling.
-- **Trace privacy:** logs and state can contain prompts, tool arguments, and results. Review and sanitize artifacts before sharing them.
+- **Runtime:** Node.js 24 LTS across all services via local Docker Compose or source execution (Docker stack verified on Linux amd64).
+- **Conversation history:** Clients must preserve and send the full public history (including tool calls, results, and phases); `previous_response_id` does not replace that history.
+- **Restart behavior:** Compose volumes persist SDK checkpoints and Bridge state. Cleanly completed Agents can resume after restart; active Runs and pending tool callbacks do not survive process replacement.
+- **Context accounting:** Token counts are character-based estimates, not authoritative SDK context measurements. A successful single prompt does not establish a safe multi-turn context ceiling.
+- **Trace privacy:** Logs and trace files contain prompt content, tool arguments, and outputs. Review and sanitize artifacts before sharing.
 
-See [protocol support](docs/specs/protocol-support.md) for the detailed compatibility contract.
+See [protocol support](docs/specs/protocol-support.md) for detailed contracts.
 
 ## Run from source
 
-With Node.js 24 LTS and npm installed:
+To run directly with Node.js 24 LTS and npm:
 
 ```bash
 npm ci
@@ -177,18 +176,18 @@ node server.mjs start
 node server.mjs status
 ```
 
-The launcher is a lightweight API + Bridge mode. It generates its own internal token and keeps process state and launcher logs under `~/.cursor2response`. Stop it with `node server.mjs stop`. A separately started Viewer does not discover that token. For the complete API + Bridge + Viewer setup, use Docker Compose or the [three-terminal source setup](docs/runbooks/local-deployment.md#direct-source-execution) instead of the launcher.
+`server.mjs` provides a lightweight API + Bridge local daemon. Internal tokens and process states are stored in `~/.cursor2response`. Stop the daemon with `node server.mjs stop`.
 
-With the API running and `CURSOR_API_KEY` exported, list models from the checkout without a raw JSON response:
+Once started, list available models in a clean terminal table:
 
 ```bash
 node server.mjs models
 node server.mjs models --json
 ```
 
-Use `--port PORT` if the API uses a different port.
+> **Note**: A standalone Trace Viewer cannot discover the dynamic token generated by `server.mjs`. To run the full stack (API + Bridge + Viewer), use Docker Compose or follow the [three-terminal source setup](docs/runbooks/local-deployment.md#direct-source-execution).
 
-## Development and documentation
+## Development and tests
 
 ```bash
 npm run typecheck
