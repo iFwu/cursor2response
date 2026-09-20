@@ -120,8 +120,17 @@ npm run trace:viewer:build
 
 Start with the [documentation index](docs/README.md) and [repository instructions](AGENTS.md). Protocol changes should update the relevant specification and regression coverage together.
 
-## License and origin
+## Credits
 
-Source is available under the [MIT license](LICENSE), retaining the original Standard Agents copyright notice. This project derives from [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api) and is maintained independently.
+- [standardagents/composer-api](https://github.com/standardagents/composer-api) — the original MIT-licensed project on which this lineage is based.
+- [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api) — our direct upstream, which extended the original project with sidecar deployment, Responses / Messages / Chat support, and client integrations.
+- `@cursor/sdk` and Cursor Composer models — the SDK and model capabilities behind the gateway.
+- [LINUX DO](https://linux.do) — a community for discussion and exchange.
+
+cursor2response is independently maintained and builds on these projects and contributions.
+
+## License
+
+Source is available under the [MIT license](LICENSE), retaining the original Standard Agents copyright notice.
 
 Dependencies retain their own licenses; `@cursor/sdk` is not covered by this repository's MIT license. See [third-party notices](THIRD_PARTY_NOTICES.md).

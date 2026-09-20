@@ -2,7 +2,7 @@
 
 ## Source lineage
 
-cursor2response derives from [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api). The original MIT notice is retained in [LICENSE](LICENSE):
+cursor2response derives from [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api), itself based on [standardagents/composer-api](https://github.com/standardagents/composer-api). The original MIT notice is retained in [LICENSE](LICENSE):
 
 > Copyright (c) 2026 Standard Agents
 

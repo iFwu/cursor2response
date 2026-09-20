@@ -120,8 +120,17 @@ npm run trace:viewer:build
 
 从[文档索引](docs/README.md)和[仓库约定](AGENTS.md)开始。协议变更应同步更新对应 spec 和回归覆盖。
 
-## 许可与来源
+## 致谢 · Credits
 
-项目源码采用 [MIT license](LICENSE)，保留原 Standard Agents 版权声明。项目派生自 [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api)，现独立维护。
+- [standardagents/composer-api](https://github.com/standardagents/composer-api)：采用 MIT 许可的原始项目，为后续 fork 提供基础。
+- [NGLSG/cursor2api](https://github.com/NGLSG/cursor2api)：本项目的直接上游，在原始项目上扩展了 sidecar 部署、Responses / Messages / Chat 三协议和客户端适配。
+- `@cursor/sdk` 与 Cursor Composer 模型：提供网关所依托的 SDK 与模型能力。
+- [LINUX DO](https://linux.do)：提供交流与讨论的社区。
+
+cursor2response 在上述项目与贡献的基础上继续扩展，现独立维护。
+
+## 许可 · License
+
+项目源码采用 [MIT license](LICENSE)，保留原 Standard Agents 版权声明。
 
 依赖保留各自许可；`@cursor/sdk` 不适用本仓库的 MIT license。详见[第三方声明](THIRD_PARTY_NOTICES.md)。
