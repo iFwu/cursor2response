@@ -95,6 +95,7 @@ function responsesInput(base, body) {
   return {
     ...base, ...continuation, requestId: crypto.randomUUID(),
     prompt: prepared.prompt.text, incrementalPrompt: followUp?.text ?? "", hasIncrementalPrompt: !!followUp,
+    images: prepared.prompt.images, incrementalImages: followUp?.images,
     resumeToolResults: continuation.results,
     agentContext: {
       bootstrapFingerprint: prepared.agentContext.bootstrap,
@@ -155,35 +156,28 @@ describe("native SDK steering", () => {
     expect(f.agent.send).not.toHaveBeenCalled();
   });
 
-  it("counts only images in the newly delivered explicit steering suffix", async () => {
+  it("delivers cumulative image steering once through the followup send instead of text-only steer", async () => {
     const body = responsesSteeringBody();
     const f = await fixture({ body });
-    const imageUser = (text) => ({ role: "user", content: [
-      { type: "input_text", text }, { type: "input_image", image_url: "data:image/png;base64,AQID" }
+    const imageUser = (text, data) => ({ role: "user", content: [
+      { type: "input_text", text }, { type: "input_image", image_url: `data:image/png;base64,${data}` }
     ] });
-    const firstBody = { ...body, input: [...body.input, imageUser("STEER_ONE")] };
-    const firstInput = responsesInput(f.input, firstBody);
-    firstInput.prompt += "\n\n[1 image input attached by the OpenAI-compatible client.]";
-    firstInput.incrementalPrompt += "\n\n[1 image input attached by the OpenAI-compatible client.]";
-    const first = runLocalAgentBody(firstInput).catch((error) => error);
-    await vi.waitFor(() => expect(f.run.steer).toHaveBeenCalledOnce());
-    const secondInput = responsesInput(f.input, { ...body, input: [...firstBody.input, imageUser("STEER_TWO")] });
-    secondInput.prompt += "\n\n[2 image inputs attached by the OpenAI-compatible client.]";
-    secondInput.incrementalPrompt += "\n\n[2 image inputs attached by the OpenAI-compatible client.]";
+    const firstBody = { ...body, input: [...body.input, imageUser("STEER_ONE", "AQID")] };
+    const first = runLocalAgentBody(responsesInput(f.input, firstBody)).catch((error) => error);
+    await vi.waitFor(() => expect(f.pending.actor.inbox).toHaveLength(1));
+    const secondInput = responsesInput(f.input, { ...body, input: [...firstBody.input, imageUser("STEER_TWO", "BAUG")] });
     const second = runLocalAgentBody(secondInput);
     await expect(first).resolves.toMatchObject({ code: "cursor_sdk_subscriber_replaced" });
-    f.acks[0].resolve("complete_delivered");
-    await vi.waitFor(() => expect(f.run.steer).toHaveBeenCalledTimes(2));
-    const prompt = f.run.steer.mock.calls[1][0];
-    expect(prompt).toContain("STEER_TWO");
-    expect(prompt).toContain("[1 image input attached by the OpenAI-compatible client.]");
-    expect(prompt).not.toContain("STEER_ONE");
-    expect(prompt).not.toContain("STABLE_INSTRUCTIONS_");
-    expect(prompt).not.toContain("[2 image inputs");
-    f.acks[1].resolve("complete_delivered");
-    await vi.waitFor(() => expect(f.pending.actor.inbox).toHaveLength(0));
+    expect(f.run.steer).not.toHaveBeenCalled();
     f.finish();
-    await expect(second).resolves.toMatchObject({ text: "Finished" });
+    await expect(second).resolves.toMatchObject({ text: "Followup" });
+    expect(f.agent.send).toHaveBeenCalledOnce();
+    const message = f.agent.send.mock.calls[0][0];
+    expect(message.images).toEqual([{ mimeType: "image/png", data: "AQID" }, { mimeType: "image/png", data: "BAUG" }]);
+    expect(message.text.match(/STEER_ONE/g)).toHaveLength(1);
+    expect(message.text.match(/STEER_TWO/g)).toHaveLength(1);
+    expect(message.text).not.toContain("STABLE_INSTRUCTIONS_");
+    expect(message.text).not.toContain("base64");
   });
 
   it("annotates the owned callback with one new suffix and retains an aborted-turn marker", async () => {
@@ -209,6 +203,30 @@ describe("native SDK steering", () => {
     expect(delivered).toContain("Keep the answer within about 4096 output tokens.");
     expect(delivered).not.toContain("STABLE_INSTRUCTIONS_");
     expect(delivered).not.toContain("PREVIOUS_RESULT");
+    expect(f.run.steer).not.toHaveBeenCalled();
+    f.finish();
+    await expect(request).resolves.toMatchObject({ text: "Finished" });
+    expect(f.agent.send).not.toHaveBeenCalled();
+  });
+
+  it("attaches tool-result and steering images to the same owned callback in order", async () => {
+    const body = responsesSteeringBody();
+    const f = await fixture({ body });
+    const callback = parkPendingToolCall(f.pending, { callId: "current-image-tool", toolCall: { type: "read", args: { path: "/tmp/image" } } });
+    const batch = await runLocalAgentBody({ ...f.input, resumeToolResults: [] });
+    const callId = batch.toolCalls[0].callId;
+    const request = runLocalAgentBody(responsesInput(f.input, { ...body, input: [...body.input,
+      { type: "function_call", call_id: callId, name: "read", arguments: '{"path":"/tmp/image"}' },
+      { type: "function_call_output", call_id: callId, output: [{ type: "input_image", image_url: "data:image/png;base64,AQID" }] },
+      { role: "user", content: [{ type: "input_text", text: "Compare" }, { type: "input_image", image_url: "data:image/png;base64,BAUG" }] }
+    ] }));
+    const delivered = await callback;
+    expect(delivered.content.filter((part) => part.type === "image")).toEqual([
+      { type: "image", mimeType: "image/png", data: "AQID" },
+      { type: "image", mimeType: "image/png", data: "BAUG" }
+    ]);
+    expect(delivered.content[0].text.match(/Compare/g)).toHaveLength(1);
+    expect(delivered.content[0].text).not.toContain("AQID");
     expect(f.run.steer).not.toHaveBeenCalled();
     f.finish();
     await expect(request).resolves.toMatchObject({ text: "Finished" });

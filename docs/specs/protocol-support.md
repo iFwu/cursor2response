@@ -38,7 +38,7 @@ message. Non-streaming output uses the same phase mapping. An unknown phase
 stays absent; tool count alone does not classify arbitrary Responses text.
 
 Clients preserve the phase when replaying assistant output. Cursor's canonical
-transcript checkpoint remains role, rendered text, and image count: phase is
+transcript checkpoint remains role, rendered text, and image count/content: phase is
 presentation metadata and does not alter SDK tool-result matching or Agent
 affinity. See [Responses Agent context affinity](responses-agent-context-affinity.md).
 

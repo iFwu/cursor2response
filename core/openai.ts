@@ -54,6 +54,7 @@ export interface ToolCallContext {
 export interface CursorSdkToolResult {
   callId?: string;
   output: unknown;
+  images?: CursorImage[];
   isError?: boolean;
 }
 
@@ -201,9 +202,11 @@ export function responseToolContinuation(
 
 function responseToolResult(item: unknown): CursorSdkToolResult | undefined {
   if (!isResponseToolOutput(item)) return undefined;
+  const content = contentToTextAndImages(item.output, "tool");
   return {
     callId: typeof item.call_id === "string" ? item.call_id : undefined,
-    output: item.output,
+    output: content.images.length ? content.text : item.output,
+    ...(content.images.length ? { images: content.images } : {}),
     isError: item.type === "custom_tool_call_output" && item.is_error === true
   };
 }
@@ -496,6 +499,7 @@ export function prepareResponsesRequest(
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const transcript: string[] = [
     tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE,
+    "Image attachments are supplied separately in transcript order; each [image] marker refers to the next attachment.",
     "TOOL RESULT records are already executed by the client. Match each result to its ASSISTANT TOOL_CALLS entry by tool_call_id; continue from the result without repeating the operation. is_error=true marks a failed result."
   ];
   const instructions = typeof record.instructions === "string" ? record.instructions.trim() : "";
@@ -1621,7 +1625,10 @@ function responseInputToTextAndImages(
       items.push({
         text: `${role.toUpperCase()}: ${content.text || "[empty]"}`,
         images: content.images,
-        value: responseMessageContextItem(role, content.text, content.images.length)
+        value: {
+          ...responseMessageContextItem(role, content.text, content.images.length),
+          ...(content.images.length ? { images: content.images } : {})
+        }
       });
       images.push(...content.images);
     } else if (record.type === "function_call" || record.type === "custom_tool_call") {
@@ -1656,6 +1663,7 @@ function responseInputToTextAndImages(
           callId,
           output,
           imageCount: content.images.length,
+          ...(content.images.length ? { images: content.images } : {}),
           isError
         }
       });

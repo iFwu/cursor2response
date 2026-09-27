@@ -78,7 +78,8 @@ Admission validates before depositing a new turn or resolving a callback:
    receives the internal aborted result.
 
 When the active run has no parked, expected, or emitted tool batch, a
-marker-free turn first attempts native SDK steering. Other valid turns remain
+marker-free text-only turn first attempts native SDK steering. Image turns
+retain their attachments until callback annotation or a follow-up SDK send. Other valid turns remain
 queued for a tool-result boundary or terminal fallback. This case is not a
 writer conflict.
 

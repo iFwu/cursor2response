@@ -753,6 +753,11 @@ async function handleRequest(request, response) {
     fullReplay
   } = parseBridgePromptFields(body, resumeToolResults);
   const agentContext = parseAgentContext(body.agentContext, prompt);
+  const images = parseImages(body.images);
+  const incrementalImages = parseImages(body.incrementalImages);
+  if (agentContext && agentContext.transcriptItemImageCounts.reduce((total, count) => total + count, 0) !== (images?.length ?? 0)) {
+    throw new HttpError("Image attachments do not match Responses context metadata.", 400, "cursor_sdk_agent_context_invalid");
+  }
   const clientTools = resumeToolResults.length > 0 && !supersedePendingRun && !agentContext
     ? []
     : parseClientTools(body.tools);
@@ -792,6 +797,8 @@ async function handleRequest(request, response) {
     apiKey,
     systemPrompt,
     model,
+    images,
+    incrementalImages,
     prompt: promptAlreadyPrepared ? prompt : bridgePrompt(prompt, clientTools),
     incrementalPrompt: promptAlreadyPrepared ? incrementalPrompt : bridgePrompt(incrementalPrompt, clientTools),
     sessionKey,
@@ -865,6 +872,22 @@ function parseBridgePromptFields(body, resumeToolResults) {
   };
 }
 
+function parseImages(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new HttpError("Invalid image inputs.", 400, "invalid_request_error");
+  return value.map((image) => {
+    if (isRecord(image) && "url" in image) {
+      throw new HttpError("Local Cursor SDK image inputs require a base64 data URL; remote image URLs are unsupported.", 400, "unsupported_parameter");
+    }
+    if (!isRecord(image) || typeof image.data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)
+      || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image.mimeType)
+      || Buffer.from(image.data, "base64").toString("base64").replace(/=+$/, "") !== image.data.replace(/=+$/, "")) {
+      throw new HttpError("Image inputs must contain valid base64 PNG, JPEG, WebP or GIF data.", 400, "invalid_request_error");
+    }
+    return { data: image.data, mimeType: image.mimeType };
+  });
+}
+
 function parseAgentContext(value, prompt) {
   if (value === undefined) return undefined;
   const hashPattern = /^[a-f0-9]{64}$/;
@@ -933,6 +956,7 @@ function normalizeResumeToolResults(value, context) {
     return {
       callId: typeof result.callId === "string" ? result.callId : undefined,
       output: result.output,
+      images: parseImages(result.images),
       isError: result.isError === true,
       content,
       contentSha256,
@@ -1261,7 +1285,7 @@ async function runLocalAgentBody(input, onEvent, signal, onProgress, options = {
         }
         const supersede = supersedingToolResults(existing, input);
         // Keep retry identity stable after the submitted prefix has been acknowledged.
-        turn.prompt = supersedingPrompt(input, existing);
+        Object.assign(turn, supersedingPrompt(input, existing));
         depositSteeringTurn(actor, turn);
         startNativeSteering(existing);
         if (supersede.mismatched && supersede.pendingCallIds.length > 0) {
@@ -1299,21 +1323,22 @@ async function runLocalAgentBody(input, onEvent, signal, onProgress, options = {
         if (extendsPendingContext) {
           const actualCallIds = pendingExternalCallIds(existing);
           const queuedCheckpoint = actor.inbox.at(-1)?.agentContext;
+          const recoverySuffix = agentContextSuffixPrompt(
+            input,
+            queuedCheckpoint && input.agentContext
+                && queuedCheckpoint.bootstrapFingerprint === input.agentContext.bootstrapFingerprint
+                && isTranscriptPrefix(queuedCheckpoint.transcriptItemHashes, input.agentContext.transcriptItemHashes)
+              ? queuedCheckpoint.transcriptItemHashes
+              : transcriptSuffixCheckpoint(
+                  pendingAuthoritativeContextState(existing),
+                  pendingProvisionalContextState(existing),
+                  input.agentContext
+                )
+          );
           const recoveryInput = {
             ...input,
-            incrementalPrompt: agentContextSuffixPrompt(
-              input,
-              queuedCheckpoint && input.agentContext
-                  && queuedCheckpoint.bootstrapFingerprint === input.agentContext.bootstrapFingerprint
-                  && isTranscriptPrefix(queuedCheckpoint.transcriptItemHashes, input.agentContext.transcriptItemHashes)
-                ? queuedCheckpoint.transcriptItemHashes
-                : transcriptSuffixCheckpoint(
-                    pendingAuthoritativeContextState(existing),
-                    pendingProvisionalContextState(existing),
-                    input.agentContext
-                  )
-            )
-              ?? input.incrementalPrompt,
+            incrementalPrompt: recoverySuffix?.prompt ?? input.incrementalPrompt,
+            incrementalImages: recoverySuffix?.images ?? input.incrementalImages,
             supersededToolCallIds: actualCallIds,
             supersedingTurnAborted: false
           };
@@ -1551,7 +1576,7 @@ async function startPendingAgentRun(
   }
   trajectoryState.lastAgentId = agentEntry.agent.agentId;
   const contextPrompt = deliveringTurns.length > 0 && input.agentContext
-    ? input.incrementalPrompt
+    ? { prompt: input.incrementalPrompt, images: input.incrementalImages }
     : agentContextIncrementalPrompt(input, agentEntry);
   const pending = createPendingAgentRun(
     cacheKey,
@@ -1589,8 +1614,11 @@ async function startPendingAgentRun(
       ? input.incrementalPrompt
       : input.prompt;
   const selectedPrompt = useIncrementalPrompt && contextPrompt !== undefined
-    ? contextPrompt
+    ? contextPrompt.prompt
     : prompt;
+  const selectedImages = useIncrementalPrompt
+    ? contextPrompt?.images ?? input.incrementalImages
+    : input.images;
   const force = forceNextRunAgentKeys.delete(cacheKey);
 
   try {
@@ -1676,7 +1704,7 @@ async function startPendingAgentRun(
       model: sdkModelSelection(input.model)
     });
     pending.executionStartedLogged = true;
-    const run = await agentEntry.agent.send(selectedPrompt, {
+    const run = await agentEntry.agent.send(selectedImages?.length ? { text: selectedPrompt, images: selectedImages } : selectedPrompt, {
       ...localAgentSendOptions(input, {
         force,
         pending,
@@ -1783,14 +1811,11 @@ function agentContextSuffixPrompt(input, checkpoint) {
   const textPrompt = input.prompt.slice(0, input.agentContext.promptTextChars);
   const transcript = textPrompt.slice(start, input.agentContext.transcriptEndOffset);
   const trailing = textPrompt.slice(input.agentContext.transcriptEndOffset);
-  let prompt = `INPUT:\n${transcript}${trailing}`;
-  const imageCount = input.agentContext.transcriptItemImageCounts
-    .slice(checkpoint.length)
+  const prompt = `INPUT:\n${transcript}${trailing}`;
+  const acceptedImageCount = input.agentContext.transcriptItemImageCounts
+    .slice(0, checkpoint.length)
     .reduce((total, count) => total + count, 0);
-  if (imageCount > 0) {
-    prompt += `\n\n[${imageCount} image input${imageCount === 1 ? "" : "s"} attached by the OpenAI-compatible client.]`;
-  }
-  return prompt;
+  return { prompt, images: (input.images ?? []).slice(acceptedImageCount) };
 }
 
 async function handleCursorSdkDelta(pending, args) {
@@ -1825,21 +1850,16 @@ async function handleCursorSdkDelta(pending, args) {
 
 function supersedingPrompt(input, pending) {
   const context = input.agentContext;
-  if (!context || context.transcriptItemOffsets.length === 0) return input.incrementalPrompt;
+  const fallback = { prompt: input.incrementalPrompt, images: input.incrementalImages };
+  if (!context || context.transcriptItemOffsets.length === 0) return fallback;
   const fullPrompt = input.prompt.slice(0, context.promptTextChars);
   const bootstrap = fullPrompt.slice(0, context.transcriptItemOffsets[0]);
   let suffix = input.incrementalPrompt;
   if (bootstrap && suffix.startsWith(bootstrap)) suffix = suffix.slice(bootstrap.length);
   else if (suffix.startsWith("INPUT:\n")) suffix = suffix.slice("INPUT:\n".length);
-  const imageMarker = /\n\n\[(\d+) image inputs? attached by the OpenAI-compatible client\.\]$/.exec(suffix);
-  if (imageMarker && context.transcriptItemImageCounts.some((count) => count > 0)) {
-    suffix = suffix.slice(0, imageMarker.index);
-  }
   const offset = fullPrompt.length - suffix.length;
   const firstItem = context.transcriptItemOffsets.indexOf(offset);
-  if (firstItem < 0 || !fullPrompt.endsWith(suffix)) return input.incrementalPrompt;
-  if (imageMarker && context.transcriptItemImageCounts.slice(firstItem)
-    .reduce((total, count) => total + count, 0) !== Number(imageMarker[1])) return input.incrementalPrompt;
+  if (firstItem < 0 || !fullPrompt.endsWith(suffix)) return fallback;
   const queued = pending.actor.inbox.at(-1)?.agentContext;
   const accepted = queued?.bootstrapFingerprint === context.bootstrapFingerprint
     && isTranscriptPrefix(queued.transcriptItemHashes, context.transcriptItemHashes)
@@ -1864,12 +1884,14 @@ function steeringTurnFromInput(actor, input) {
     .update(stableJson({
       cacheKey: actor.cacheKey,
       supersededToolCallIds: input.supersededToolCallIds,
-      prompt: input.incrementalPrompt
+      prompt: input.incrementalPrompt,
+      images: input.incrementalImages
     }))
     .digest("hex");
   return {
     identity,
     prompt: input.incrementalPrompt,
+    images: input.incrementalImages,
     systemPrompt: input.systemPrompt,
     agentContext: input.agentContext,
     model: input.model,
@@ -1937,6 +1959,7 @@ function markSteeringTurnsDelivered(actor, turns, state) {
     delete turn.agentContext;
     delete turn.provisionalCheckpoint;
     delete turn.systemPrompt;
+    delete turn.images;
   }
   actor.inbox = actor.inbox.filter((turn) => !identities.has(turn.identity));
   const delivered = [...actor.steeringTurns.values()].filter((turn) => !["queued", "native_pending"].includes(turn.state));
@@ -1956,7 +1979,8 @@ function startNativeSteering(pending) {
   if (!actorOwnsPendingRun(pending) || pending.terminalError || pending.terminalOutput
     || pending.cancelledByRequest || typeof run?.steer !== "function"
     || pending.parked.size > 0 || pending.emitted.size > 0 || pending.expected.size > 0
-    || !turn || turn.state !== "queued" || turn.nativeAttempted || turn.supersedingTurnAborted) return;
+    || !turn || turn.state !== "queued" || turn.nativeAttempted || turn.supersedingTurnAborted
+    || turn.images?.length > 0) return;
   turn.state = "native_pending";
   turn.nativeAttempted = true;
   const checkpoint = pending.transcriptItemHashes ? [...pending.transcriptItemHashes] : undefined;
@@ -2033,6 +2057,7 @@ function startSteeringInboxRun(existing, input, onEvent, signal, onProgress, car
     clientTools: latest.clientTools,
     trajectoryInputs: turns.flatMap((turn) => turn.trajectoryInputs ?? []),
     incrementalPrompt: mergedSteeringPrompt(turns),
+    incrementalImages: turns.flatMap((turn) => turn.images ?? []),
     hasIncrementalPrompt: true,
     resumeToolResults: [],
     supersedePendingRun: false,
@@ -3468,7 +3493,8 @@ function toolResultWithSteeringAnnotation(result, turns) {
   const output = stringifyToolResult(result.output);
   return {
     ...result,
-    output: output ? `${output}\n\n${annotation}` : annotation
+    output: output ? `${output}\n\n${annotation}` : annotation,
+    images: [...(result.images ?? []), ...turns.flatMap((turn) => turn.images ?? [])]
   };
 }
 
@@ -3787,6 +3813,15 @@ function signalPendingAgentRun(pending) {
 }
 
 function toSdkToolResult(result) {
+  if (result.images?.length) {
+    return {
+      content: [
+        { type: "text", text: stringifyToolResult(result.output) },
+        ...result.images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }))
+      ],
+      ...(result.isError ? { isError: true } : {})
+    };
+  }
   if (result.isError) {
     return { content: [{ type: "text", text: stringifyToolResult(result.output) }], isError: true };
   }

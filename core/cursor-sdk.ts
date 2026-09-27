@@ -58,6 +58,7 @@ type ClientToolSpec = OpenAiToolSpec;
 interface CursorSdkToolResult {
   callId?: string;
   output: unknown;
+  images?: CursorImage[];
   isError?: boolean;
   contentSha256?: string;
   contentChars?: number;
@@ -77,6 +78,8 @@ interface CursorSdkBridgeRunInput {
   runId: string;
   sessionKey: string;
   prompt: string;
+  images?: CursorImage[];
+  incrementalImages?: CursorImage[];
   systemPrompt?: string;
   modelId: string;
   workingDirectory?: string;
@@ -291,7 +294,9 @@ export async function createCursorSdkCompletion(
 
   sdkSessions.set(sessionIdentity.id, { agentId, updatedAt: updatedAt.getTime() });
 
-  const prompt = sdkPrompt(input.prompt);
+  const images = sdkImages(input.prompt.images);
+  const incrementalImages = sdkImages(input.incrementalPrompt?.images);
+  input.resumeToolResults?.forEach((result) => sdkImages(result.images));
   const agentContext = input.agentContext
     ? await sdkAgentContext(input.agentContext, input.prompt.text.length, input.systemPrompt)
     : undefined;
@@ -305,13 +310,15 @@ export async function createCursorSdkCompletion(
     agentId,
     runId,
     sessionKey: sessionIdentity.id,
-    prompt,
+    prompt: input.prompt.text,
+    images,
+    incrementalImages,
     systemPrompt: input.systemPrompt,
     modelId: input.model?.id || "composer-2.5",
     workingDirectory: input.workingDirectory,
     clientTools: input.clientTools,
     allowToolCall: input.allowToolCall,
-    incrementalPrompt: input.incrementalPrompt ? sdkPrompt(input.incrementalPrompt) : undefined,
+    incrementalPrompt: input.incrementalPrompt?.text,
     resumeToolResults: input.resumeToolResults,
     supersedePendingRun: input.supersedePendingRun === true,
     supersedingTurnAborted: input.supersedingTurnAborted === true,
@@ -761,6 +768,8 @@ async function cursorLocalSdkBridgeJson(
     runId: string;
     sessionKey: string;
     prompt: string;
+    images?: CursorImage[];
+    incrementalImages?: CursorImage[];
     systemPrompt?: string;
     modelId: string;
     workingDirectory?: string;
@@ -800,6 +809,8 @@ async function cursorLocalSdkBridgeResponse(
     runId: string;
     sessionKey: string;
     prompt: string;
+    images?: CursorImage[];
+    incrementalImages?: CursorImage[];
     systemPrompt?: string;
     modelId: string;
     workingDirectory?: string;
@@ -845,6 +856,8 @@ async function cursorLocalSdkBridgeResponse(
           incrementalPrompt: input.incrementalPrompt,
           tools: bridgeClientTools(input.clientTools)
         }),
+    images: input.images,
+    incrementalImages: input.incrementalImages,
     resumeToolResults: input.resumeToolResults,
     fullReplayCause: input.fullReplayCause,
     agentContext: input.agentContext,
@@ -1202,9 +1215,11 @@ function stringArgAllowEmpty(args: Record<string, unknown>, ...keys: string[]): 
   return undefined;
 }
 
-function sdkPrompt(prompt: { text: string; images?: CursorImage[] }): string {
-  if (!prompt.images?.length) return prompt.text;
-  return `${prompt.text}\n\n[${prompt.images.length} image input${prompt.images.length === 1 ? "" : "s"} attached by the OpenAI-compatible client.]`;
+function sdkImages(images?: CursorImage[]): CursorImage[] | undefined {
+  if (images?.some((image) => "url" in image)) {
+    throw new HttpError("Local Cursor SDK image inputs require a base64 data URL; remote image URLs are unsupported.", 400, "unsupported_parameter", "image_url");
+  }
+  return images;
 }
 
 async function sdkAgentContext(

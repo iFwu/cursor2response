@@ -157,6 +157,7 @@ Trace Viewer 将同一 Session 内的请求流转、Agent 迁移、SDK Run 生�
 
 ## 兼容范围与运行约束
 
+- **图片输入：** Responses 支持 PNG、JPEG、WebP、GIF 的 base64 data URL，包括工具返回的图片。远程图片 URL 返回明确的 400，需改为 data URL；实际识图能力取决于模型。Bridge 请求体默认上限为 1 MiB（`CURSOR_SDK_BRIDGE_MAX_JSON_BYTES`），包含 base64 与完整历史，详见[图片输入契约](docs/specs/responses-agent-context-affinity.md#image-inputs)。
 - **核心协议：** `/v1/responses`，全面支持流式传输、客户端工具定义、工具结果连续回传及会话亲和性。Codex 与 OpenClaw 为核心验收标准。
 - **兼容端点（Best Effort）：** `/v1/chat/completions`、`/v1/messages` 及 `/v1/messages/count_tokens` 仅作基础功能适配，不承诺所有上游参数行为完全对齐。
 - **运行时：** 源码运行支持 Node.js 24 及以上版本（已验证 Node 24 与 26）；Linux amd64 Docker 镜像继续固定 Node.js 24 LTS，作为稳定部署基线。

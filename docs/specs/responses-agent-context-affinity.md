@@ -71,9 +71,9 @@ the transcript items produced while B was active and the latest user turn.
 
 The shared Responses renderer derives one canonical value per rendered item:
 
-- message: role, rendered text, and attached-image count;
+- message: role, rendered text, attached-image count and image content;
 - function or custom tool call: public call ID, name, and normalized arguments;
-- function or custom tool output: public call ID, rendered output, image count,
+- function or custom tool output: public call ID, rendered output, image count and content,
   and error state;
 - other visible item: normalized JSON without root transport ID or status.
 
@@ -91,6 +91,38 @@ when replaying history and append each `function_call_output` after that
 ordered output. The adapter's rendering of the replayed `input` is therefore
 the authoritative public transcript order. SDK event arrival or callback
 delivery order cannot override it.
+
+## Image inputs
+
+The local Bridge sends base64 PNG, JPEG, WebP and GIF inputs through SDK 1.0.31
+`Agent.send({ text, images })`. Each `[image]` marker corresponds to the next
+attachment in transcript order; image bytes are not inserted into prompt text.
+Both message and tool-output content participate in transcript hashes, so
+replacing an image with another of the same count causes a full replay.
+The bootstrap describes this attachment contract, replacing older completed
+Agents that only received image-count guidance.
+
+Active tool-result images use native SDK custom-tool `content` image blocks on
+the owned callback, preserving `isError`. A replay attaches those historical
+images to its reconstructed prompt instead. The adapter never sends both forms
+within the same run. Incremental sends omit accepted images along with accepted
+text. Native `Run.steer(text)` cannot carry images; image steering remains in
+the existing inbox until callback annotation or a follow-up `Agent.send` can
+transfer its text and attachments together.
+
+SDK local agents do not accept remote image URLs. HTTP(S), file and other URL
+inputs return `400 unsupported_parameter` with a request to use a base64 data
+URL. The gateway does not download URLs or create temporary image files.
+Malformed base64 and unsupported media types return `400 invalid_request_error`
+before SDK admission. Existing Sidecar and Bridge JSON body limits still apply;
+`CURSOR_SDK_BRIDGE_MAX_JSON_BYTES` defaults to 1 MiB, including base64 and history.
+Model vision capability and upstream media limits remain model-dependent.
+
+The executable checks in [image delivery tests](../../bridge/image-input.test.mjs)
+exercise Responses preparation, Bridge transport and actual mocked SDK send or
+callback payloads. [Steering tests](../../bridge/native-steering.test.mjs) cover
+cumulative image turns and callback annotation. These checks do not prove a
+model's live image recognition.
 
 ## Model-visible input accounting
 
@@ -150,7 +182,7 @@ accepted public branch. For a new turn, the provisional checkpoint must also
 be an exact prefix of the current transcript because it represents history
 that may already exist inside the Cursor Agent. The Bridge slices only after
 that provisional checkpoint. The sliced prompt prepends `INPUT:`, retains
-current output constraints, and adds an image marker for missing items only.
+current output constraints, and attaches images for missing items only.
 The Sidecar's legacy latest-assistant heuristic is not authoritative for
 context-aware requests.
 

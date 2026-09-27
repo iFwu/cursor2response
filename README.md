@@ -157,6 +157,8 @@ Through intensive real-world use with Codex and OpenClaw, it evolved to incorpor
 
 ## Compatibility and limits
 
+- **Images:** Responses accepts base64 data URLs (PNG, JPEG, WebP and GIF), including tool-result images. Remote image URLs return an explicit 400; send their contents as data URLs. Vision support depends on the selected model. The Bridge JSON body limit defaults to 1 MiB (`CURSOR_SDK_BRIDGE_MAX_JSON_BYTES`), including base64 and history. See the [image input contract](docs/specs/responses-agent-context-affinity.md#image-inputs).
+
 - **Primary API:** `/v1/responses`, including streaming, client tools, tool-result continuation, and session affinity. Codex and OpenClaw serve as the main acceptance paths.
 - **Best effort:** `/v1/chat/completions`, `/v1/messages`, and `/v1/messages/count_tokens`. These endpoints do not claim full protocol conformance.
 - **Runtime:** Source execution supports Node.js 24 or later (verified on Node 24 and 26). The Linux amd64 Docker image stays pinned to Node.js 24 LTS for a stable deployment baseline.
