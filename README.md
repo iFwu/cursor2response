@@ -135,7 +135,7 @@ Screenshots use synthetic demo data. For session inspection and live log workflo
 | **In-run tool continuation** | Tool results settle pending callbacks on the active SDK Run, keeping the internal agent loop intact. |
 | **Native steering** | Inject new instructions into an in-progress Run via `Run.steer()` with ordered handling and delivery receipts. |
 | **Trace Viewer** | Local visual interface to inspect session history, context replays, tool latencies, and runtime ownership. |
-| **Context-overflow fallback** | Opt-in `cursor-auto` routes to a configured Responses endpoint when SDK context compaction occurs. |
+| **Context-overflow fallback** | Opt-in `cursor-relay` routes to a configured Responses endpoint when SDK context compaction occurs. |
 | **Native system prompt** | Pass `system_prompt` on Responses requests to replace or strip the default Cursor system prompt. |
 | **Clean execution boundaries** | Intermediate commentary and final answers remain distinct; cancellations target the owning execution; clean Agents resume across restarts. |
 
@@ -146,7 +146,7 @@ Screenshots use synthetic demo data. For session inspection and live log workflo
 - **Decoupled Requests and Runs**: An HTTP request is not an SDK Run. Multiple tool round trips complete inside the same active Run, avoiding redundant context reconstruction.
 - **Multi-turn Reuse and Steering**: Subsequent user turns can start a new Run on the existing Agent, or inject prompt updates into an active Run via native steering.
 - **Prefix-matched Replays**: Reuse relies on an exact hash prefix match of conversation history. If client-side compaction or edits diverge from the accepted transcript, the gateway safely performs a full replay.
-- **API fallback**: Select `cursor-auto` and configure `C2R_PRIMARY_MODEL`, `C2R_FALLBACK_BASE_URL`, `C2R_FALLBACK_API_KEY` and `C2R_FALLBACK_MODEL`. Confirmed SDK compaction marks the session for fallback; the current request is recovered only before public output and after confirmed SDK cleanup. See [setup](docs/runbooks/local-deployment.md#optional-api-fallback-route) and the [routing contract](docs/specs/api-fallback.md).
+- **API fallback**: Select `cursor-relay` and configure `C2R_PRIMARY_MODEL`, `C2R_FALLBACK_BASE_URL`, `C2R_FALLBACK_API_KEY` and `C2R_FALLBACK_MODEL`. Confirmed SDK compaction marks the session for fallback; the current request is recovered only before public output and after confirmed SDK cleanup. See [setup](docs/runbooks/local-deployment.md#optional-api-fallback-route) and the [routing contract](docs/specs/api-fallback.md).
 - **Native System Prompt Override**: Pass a non-empty `system_prompt` string to replace the Cursor system prompt, or pass `false` for the SDK default (requires account support). See the [system prompt contract](docs/specs/responses-agent-context-affinity.md#native-system-prompt).
 
 ## Why this project exists

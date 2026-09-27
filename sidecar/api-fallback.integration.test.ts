@@ -12,13 +12,14 @@ import { setTimeout as delay } from "node:timers/promises";
 const serverPath = fileURLToPath(new URL("../dist/runtime/sidecar/server.js", import.meta.url));
 
 test.each([
+  { stream: false, published: false, safe: true, model: "cursor-relay", recovered: true },
   { stream: false, published: false, safe: true, model: "cursor-auto", recovered: true },
-  { stream: true, published: false, safe: true, model: "cursor-auto", recovered: true },
-  { stream: true, published: false, safe: true, model: "cursor-auto", recovered: true, bodySession: true },
-  { stream: true, published: true, safe: true, model: "cursor-auto", recovered: false },
-  { stream: true, published: false, safe: false, model: "cursor-auto", recovered: false },
+  { stream: true, published: false, safe: true, model: "cursor-relay", recovered: true },
+  { stream: true, published: false, safe: true, model: "cursor-relay", recovered: true, bodySession: true },
+  { stream: true, published: true, safe: true, model: "cursor-relay", recovered: false },
+  { stream: true, published: false, safe: false, model: "cursor-relay", recovered: false },
   { stream: true, published: false, safe: true, model: "grok-4.6", recovered: false },
-  { stream: false, published: false, safe: true, model: "cursor-auto", recovered: true, primary: "grok-4.6-fast" },
+  { stream: false, published: false, safe: true, model: "cursor-relay", recovered: true, primary: "grok-4.6-fast" },
   { stream: false, published: false, safe: true, model: "grok-hybrid", recovered: false },
   { stream: false, published: false, safe: true, model: "grok-hybrid-fast", recovered: false }
 ])("routes SDK overflow through the real Sidecar HTTP boundary: %j", async (scenario) => {
@@ -100,10 +101,10 @@ test.each([
     child = undefined;
     return await logs;
   };
-  const request = (session: string, input: unknown = "continue") => fetch(`http://127.0.0.1:${port}/v1/responses`, {
+  const request = (session: string, input: unknown = "continue", model = scenario.model) => fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST", headers: { authorization: "Bearer cursor-key", "content-type": "application/json",
       ...(scenario.bodySession ? {} : { session_id: session }) },
-    body: JSON.stringify({ model: scenario.model, stream: scenario.stream, input,
+    body: JSON.stringify({ model, stream: scenario.stream, input,
       ...(scenario.bodySession ? { prompt_cache_key: session } : {}) })
   });
   try {
@@ -112,16 +113,21 @@ test.each([
     port = await reservePort();
     await start();
     const headers = { authorization: "Bearer cursor-key" };
-    const catalog = await (await fetch(`http://127.0.0.1:${port}/v1/models`, { headers })).json() as { data: Array<{ id: string }> };
-    expect(catalog.data.map((model) => model.id)).toEqual(["cursor-primary", "cursor-auto"]);
-    expect((await fetch(`http://127.0.0.1:${port}/v1/models/cursor-auto`, { headers })).status).toBe(200);
-    for (const removed of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-auto-fast"]) {
+    const catalog = await (await fetch(`http://127.0.0.1:${port}/v1/models`, { headers })).json() as { data: Array<{ id: string; name?: string }> };
+    expect(catalog.data.map((model) => model.id)).toEqual(["cursor-primary", "cursor-relay"]);
+    expect(catalog.data.at(-1)?.name).toBe("Cursor Relay");
+    for (const id of ["cursor-relay", "cursor-auto"]) {
+      const lookup = await fetch(`http://127.0.0.1:${port}/v1/models/${id}`, { headers });
+      expect(lookup.status).toBe(200);
+      expect(await lookup.json()).toMatchObject({ id, name: "Cursor Relay" });
+    }
+    for (const removed of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-relay-fast", "cursor-auto-fast"]) {
       expect((await fetch(`http://127.0.0.1:${port}/v1/models/${removed}`, { headers })).status).toBe(404);
     }
     if (scenario.bodySession) {
       const missingSession = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
         method: "POST", headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ model: "cursor-auto", input: "continue" })
+        body: JSON.stringify({ model: "cursor-relay", input: "continue" })
       });
       expect(missingSession.status).toBe(400);
       expect(await missingSession.json()).toMatchObject({ error: { code: "api_fallback_session_required" } });
@@ -133,7 +139,7 @@ test.each([
     expect(firstBody.includes("MP result")).toBe(scenario.recovered);
     expect(firstBody.includes("context_length_exceeded")).toBe(!scenario.recovered);
     expect(sdkCalls).toBe(1);
-    if (scenario.model === "cursor-auto") {
+    if (["cursor-relay", "cursor-auto"].includes(scenario.model)) {
       expect(sdkModels[0]).toBe(scenario.primary ? "grok-4.6[fast=true,effort=high]" : "cursor-primary");
     }
     expect(fallbackCalls).toHaveLength(scenario.recovered ? 1 : 0);
@@ -141,7 +147,7 @@ test.each([
       expect(firstBody.match(/event: response.created/g)).toHaveLength(1);
       expect(firstBody).not.toContain("response.failed");
     }
-    if (scenario.model === "cursor-auto") {
+    if (["cursor-relay", "cursor-auto"].includes(scenario.model)) {
       const oldLogs = await stop();
       expect(oldLogs).toContain("trajectory_route_decision");
       await start();
@@ -150,7 +156,7 @@ test.each([
         { type: "function_call_output", call_id: "call-old", output: "already executed" },
         { role: "user", content: "continue" }
       ];
-      expect(await (await request("session-one", input)).text()).toContain("MP result");
+      expect(await (await request("session-one", input, "cursor-relay")).text()).toContain("MP result");
       expect(sdkCalls).toBe(1);
       expect(fallbackCalls.at(-1)).toMatchObject({ authorization: "Bearer mp-key", body: { model: "mp-grok-4.6", input } });
       await (await request("session-two")).text();
@@ -216,7 +222,7 @@ test.each(["reset", "eof"])("terminates interrupted fallback SSE over HTTP (%s),
       const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
         method: "POST", signal: AbortSignal.timeout(5000),
         headers: { authorization: "Bearer cursor-key", "content-type": "application/json", session_id: "stream-session" },
-        body: JSON.stringify({ model: "cursor-auto", stream: true, input: "continue" })
+        body: JSON.stringify({ model: "cursor-relay", stream: true, input: "continue" })
       });
       expect(response.ok).toBe(true);
       const reader = response.body!.getReader();

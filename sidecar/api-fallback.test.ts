@@ -8,6 +8,9 @@ import { HttpError } from "../core/http.ts";
 import { API_FALLBACK_MODEL, ApiFallbackRoute, apiFallbackConfig, fallbackNotifyArgs, isApiFallbackModel, lastUserSnippet, type ApiFallbackConfig, type ApiFallbackRequest } from "./api-fallback.ts";
 import { observeFallbackResponse } from "./fallback-trace.ts";
 
+// Frozen pre-rename marker identity for the fixture below.
+const LEGACY_ROUTE_FILENAME = "634528cc585e2dcc2029ea4fa35624a1476d6d570a3a5691d9d0a7bb1f421078.json";
+
 async function fixture(run: (input: {
   config: ApiFallbackConfig; request: ApiFallbackRequest; calls: RequestInit[];
   events: Array<{ event: string; fields: Record<string, unknown> }>;
@@ -17,7 +20,7 @@ async function fixture(run: (input: {
   const config: ApiFallbackConfig = { primaryModel: "cursor-primary", responsesUrl: "https://fallback.example/v1/responses",
     apiKey: "fallback-secret", model: "mp-grok", stateDirectory: directory };
   const request: ApiFallbackRequest = {
-    apiKey: "cursor-secret", body: { model: "cursor-auto", input: "hello", stream: false },
+    apiKey: "cursor-secret", body: { model: "cursor-relay", input: "hello", stream: false },
     session: { key: "session-one", source: "header:session-id", sessionHeaders: ["session-id"] },
     workingDirectory: "/project", requestId: "resp-one", signal: new AbortController().signal,
     clientSource: "openclaw", clientPlatform: "linux", inputs: [{ source: "user", content: "hello" }]
@@ -35,10 +38,11 @@ async function fixture(run: (input: {
   }
 }
 
-test("recognizes only the cursor-auto logical model", () => {
+test("recognizes cursor-relay and the unlisted cursor-auto migration alias", () => {
   expect(isApiFallbackModel(API_FALLBACK_MODEL)).toBe(true);
+  expect(isApiFallbackModel(" CURSOR-RELAY ")).toBe(true);
   expect(isApiFallbackModel(" CURSOR-AUTO ")).toBe(true);
-  for (const model of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-auto-fast", "grok-4.6"]) {
+  for (const model of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-relay-fast", "cursor-auto-fast", "grok-4.6"]) {
     expect(isApiFallbackModel(model)).toBe(false);
   }
   expect(isApiFallbackModel("api-fallback-other")).toBe(false);
@@ -56,14 +60,15 @@ test("requires an explicit complete fallback configuration and rejects recursive
   for (const name of Object.keys(env)) {
     expect(() => apiFallbackConfig({ ...env, [name]: " " })).toThrow(name);
   }
-  expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: " CURSOR-AUTO " })).toThrow();
-  expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: "cursor-auto[fast=true]" })).toThrow();
-  expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_MODEL: " CURSOR-AUTO " })).toThrow();
+  for (const model of ["cursor-relay", "cursor-auto"]) {
+    expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: ` ${model.toUpperCase()} ` })).toThrow();
+    expect(() => apiFallbackConfig({ ...env, C2R_PRIMARY_MODEL: `${model}[fast=true]` })).toThrow();
+    expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_MODEL: ` ${model.toUpperCase()} ` })).toThrow();
+  }
   expect(apiFallbackConfig({ ...env, C2R_FALLBACK_TIMEOUT_MS: "" })?.timeoutMs).toBe(180000);
   for (const timeout of ["0", "-1", "1.5", "invalid", "3600001"]) {
     expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_TIMEOUT_MS: timeout })).toThrow("timeout");
   }
-  expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_MODEL: "cursor-auto" })).toThrow();
   expect(() => apiFallbackConfig({ ...env, C2R_FALLBACK_BASE_URL: "file:///tmp" })).toThrow();
 });
 
@@ -82,12 +87,34 @@ test("persists overflow routing across instances without forwarding Cursor crede
     expect(new Headers(calls[1].headers).get("authorization")).toBe("Bearer fallback-secret");
     expect(JSON.stringify(calls)).not.toContain("cursor-secret");
     const files = await readdir(config.stateDirectory);
-    expect(files).toHaveLength(1);
+    expect(files).toEqual([LEGACY_ROUTE_FILENAME]);
     expect((await stat(path.join(config.stateDirectory, files[0]))).mode & 0o777).toBe(0o600);
     expect(await readFile(path.join(config.stateDirectory, files[0]), "utf8")).not.toContain("secret");
     expect(await route({ apiKey: "other-key" }).initialResponse()).toBeUndefined();
     expect(await route({ workingDirectory: "/other" }).initialResponse()).toBeUndefined();
     expect(await route({ session: { ...request.session, key: "new-session" } }).initialResponse()).toBeUndefined();
+  });
+});
+
+test("cursor-relay and cursor-auto reuse pre-rename fallback markers immediately", async () => {
+  await fixture(async ({ route, calls, config, request, events }) => {
+    await writeFile(path.join(config.stateDirectory, LEGACY_ROUTE_FILENAME), JSON.stringify({
+      version: 1, route: "fallback", since: "2026-09-01T00:00:00.000Z",
+      sessionKey: request.session.key, requestId: "resp-before-rename"
+    }), { mode: 0o600 });
+    for (const model of ["cursor-relay", "cursor-auto"]) {
+      const response = await route({ body: { ...request.body, model } }).initialResponse();
+      expect(response?.ok).toBe(true);
+      expect(await response?.json()).toMatchObject({ id: "resp-mp", status: "completed" });
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => JSON.parse(call.body as string).model)).toEqual(["mp-grok", "mp-grok"]);
+    expect(events.filter((event) => event.event === "trajectory_route_decision").map((event) => event.fields))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ route: "fallback", routeStickyHit: true, logicalModel: "cursor-relay" })
+      ]));
+    expect(events.some((event) => event.fields.route === "cursor_sdk")).toBe(false);
+    expect(await readdir(config.stateDirectory)).toEqual([LEGACY_ROUTE_FILENAME]);
   });
 });
 

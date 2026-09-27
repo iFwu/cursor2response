@@ -129,7 +129,7 @@ A restart during a run, exposed tool batch, or cancellation does not preserve pe
 
 ## Optional api-fallback route
 
-Select `model: "cursor-auto"` in the client. All four settings are required:
+Select `model: "cursor-relay"` in the client. All four settings are required:
 
 ```dotenv
 C2R_PRIMARY_MODEL=cursor-model
@@ -138,10 +138,15 @@ C2R_FALLBACK_API_KEY=replace-with-dedicated-key
 C2R_FALLBACK_MODEL=upstream-model
 ```
 
+The catalog displays **Cursor Relay**. Existing `cursor-auto` requests remain
+accepted during migration and share the same sticky route markers. Migrate
+client and gateway model selections to `cursor-relay`; the old request alias
+can be removed once every client and gateway has migrated.
+
 `C2R_PRIMARY_MODEL` must name an available Cursor model; `C2R_FALLBACK_MODEL`
 must name a model accepted by the external API. They may differ. For a Grok
 fast primary, set `C2R_PRIMARY_MODEL=grok-4.6-fast`; there is no separate
-`cursor-auto-fast` alias. Other client model choices continue to use the SDK
+`cursor-relay-fast` alias. Other client model choices continue to use the SDK
 directly. This configures one route, not per-model mappings or a fallback chain.
 
 The base URL excludes `/responses`. `C2R_FALLBACK_TIMEOUT_MS` defaults to 180000

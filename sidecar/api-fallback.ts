@@ -10,11 +10,16 @@ import type { SessionAffinityResolution } from "./session-affinity.ts";
 import { observeFallbackResponse, type FallbackTrace } from "./fallback-trace.ts";
 import { guardFallbackStream } from "./fallback-stream.ts";
 
-export const API_FALLBACK_MODEL = "cursor-auto";
+export const API_FALLBACK_MODEL = "cursor-relay";
+export const API_FALLBACK_DISPLAY_NAME = "Cursor Relay";
+// Remove the request alias after all clients and gateways migrate to cursor-relay.
+const LEGACY_API_FALLBACK_MODEL = "cursor-auto";
+// Persistent route identity must survive client-facing renames and alias removal.
+const API_FALLBACK_STATE_NAMESPACE = "cursor-auto";
 
 export function isApiFallbackModel(modelId: string): boolean {
   const normalized = modelId.trim().toLowerCase();
-  return normalized === API_FALLBACK_MODEL;
+  return normalized === API_FALLBACK_MODEL || normalized === LEGACY_API_FALLBACK_MODEL;
 }
 
 export interface ApiFallbackConfig {
@@ -193,7 +198,7 @@ export class ApiFallbackRoute {
       throw new HttpError("api-fallback does not support the SDK-only system_prompt override.", 400, "unsupported_parameter", "system_prompt");
     }
     this.key = createHash("sha256")
-      .update(JSON.stringify([request.apiKey, API_FALLBACK_MODEL, config.primaryModel,
+      .update(JSON.stringify([request.apiKey, API_FALLBACK_STATE_NAMESPACE, config.primaryModel,
         config.responsesUrl, config.model, request.workingDirectory ?? "", request.session.key]))
       .digest("hex");
     this.store = new FallbackRouteStore(config.stateDirectory);

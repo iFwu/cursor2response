@@ -4,15 +4,18 @@ Status: current
 
 ## Identity And State
 
-Model `cursor-auto` enables one configured primary-to-fallback route on local
+Model `cursor-relay` enables one configured primary-to-fallback route on local
 Responses. `C2R_PRIMARY_MODEL` selects the Cursor SDK model; normal Cursor model
 parameter handling still applies. For example, `grok-4.6-fast` selects Grok fast
 mode without introducing a second fallback alias. Other model requests use
 their existing direct SDK path.
 
 The feature/module is named `api-fallback`; its client-facing model ID is
-`cursor-auto` (display name: Cursor Auto). Auto means following this explicitly
-configured route, not choosing among multiple primary models.
+`cursor-relay` (display name: Cursor Relay). It follows the explicitly configured
+primary and fallback, independently of Cursor's own Auto model selection.
+The catalog advertises only `cursor-relay`. `cursor-auto` remains an unlisted
+request and model-lookup alias during migration; remove it after all clients
+and gateways have migrated to `cursor-relay`.
 
 `C2R_PRIMARY_MODEL`, `C2R_FALLBACK_BASE_URL`, `C2R_FALLBACK_API_KEY` and
 `C2R_FALLBACK_MODEL` are all required to enable the route. The fallback model
@@ -45,6 +48,9 @@ primary model, fallback Responses URL/model, working directory and resolved
 session key, independently of SDK Agent/trace IDs. Rotating the fallback key
 preserves route identity. Changing either model or the fallback URL starts a
 different route identity; drain or explicitly migrate active sessions first.
+The logical-model namespace in persisted marker hashes remains `cursor-auto`
+for both request IDs, even after the request alias is removed. Renaming a client
+model must not discard an existing sticky fallback decision or retry the SDK.
 Only confirmed `cursor_sdk_context_compacted` arms fallback. Generic 413,
 authentication, timeout, rate-limit and model failures do not.
 

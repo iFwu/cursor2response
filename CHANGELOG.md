@@ -2,15 +2,18 @@
 
 ## Unreleased
 
-- Replace `grok-hybrid` and `grok-hybrid-fast` with `cursor-auto`. Both the
+- Replace `grok-hybrid` and `grok-hybrid-fast` with `cursor-relay` (Cursor Relay). Both the
   Cursor primary and external Responses model are explicitly configured with
   `C2R_PRIMARY_MODEL`, `C2R_FALLBACK_BASE_URL`, `C2R_FALLBACK_API_KEY` and
-  `C2R_FALLBACK_MODEL`. Old aliases and environment keys are removed.
+  `C2R_FALLBACK_MODEL`. The Grok aliases and old environment keys are removed.
+- Existing `cursor-auto` clients remain compatible through an unlisted migration
+  alias. Both IDs preserve the existing `cursor-auto` sticky route namespace;
+  remove the request alias after all clients and gateways migrate.
 - Route state now includes the configured primary and fallback target and lives
-  in `fallback-routes`. Existing deployments must migrate active route markers
-  and update client/gateway model selection before switching; old markers are
-  not automatically read. Configure `C2R_FALLBACK_NOTIFY_COMMAND` to opt into
-  external notifications.
+  in `fallback-routes`. Deployments using the earlier `grok-hybrid` state format
+  must migrate active route markers and update client/gateway model selection
+  before switching; those markers are not automatically read. Configure
+  `C2R_FALLBACK_NOTIFY_COMMAND` to opt into external notifications.
 
 The initial cursor2response source snapshot establishes a local Responses-focused gateway, SDK Bridge, and Trace Viewer.
 

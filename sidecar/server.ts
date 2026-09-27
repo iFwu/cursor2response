@@ -62,6 +62,7 @@ import {
 import { resolveSessionAffinity, type SessionAffinityResolution } from "./session-affinity.ts";
 import {
   API_FALLBACK_MODEL,
+  API_FALLBACK_DISPLAY_NAME,
   ApiFallbackRoute,
   apiFallbackConfig,
   isApiFallbackModel
@@ -378,7 +379,7 @@ async function handleModels(request: Request): Promise<Response> {
   const data = openAiCatalogData(models);
   try {
     if (apiFallbackConfig()) {
-      data.push({ id: API_FALLBACK_MODEL, object: "model", created: 0, owned_by: "cursor2response" });
+      data.push({ id: API_FALLBACK_MODEL, object: "model", created: 0, owned_by: "cursor2response", name: API_FALLBACK_DISPLAY_NAME });
     }
   } catch { /* An optional route cannot make the existing model catalog unavailable. */ }
   return json({ object: "list", data });
@@ -388,7 +389,7 @@ async function handleModel(request: Request, id: string): Promise<Response> {
   const apiKey = resolveApiKey(request);
   if (!apiKey) return unauthorized();
   if (isApiFallbackModel(id) && apiFallbackConfig()) {
-    return json({ id, object: "model", created: 0, owned_by: "cursor2response" });
+    return json({ id, object: "model", created: 0, owned_by: "cursor2response", name: API_FALLBACK_DISPLAY_NAME });
   }
   const models = openAiCatalogData(await liveCursorModels(apiKey));
   const model = models.find((item) => item.id === id);

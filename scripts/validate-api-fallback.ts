@@ -37,7 +37,7 @@ const tools = values.namespace
   : [stepTool];
 try {
   for (let step = 1; step <= turns; step++) {
-    const body = { model: "cursor-auto", stream: true, store: false, instructions, input,
+    const body = { model: "cursor-relay", stream: true, store: false, instructions, input,
       tools,
       tool_choice: { type: "function", name: "record_step", ...(values.namespace ? { namespace: "protocol" } : {}) }, parallel_tool_calls: false,
       max_output_tokens: 1024, reasoning: { effort: "low" } };
