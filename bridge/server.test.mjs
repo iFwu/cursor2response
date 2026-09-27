@@ -6971,6 +6971,25 @@ describe("Cursor SDK local-agent bridge", () => {
     });
   });
 
+  it("preserves Grok 4.7 registry parameters when creating and continuing an agent", () => {
+    const input = {
+      apiKey: "test-key",
+      model: "grok-4.7[context=500k,reasoning_effort=high,fast=false]",
+      workingDirectory: "/tmp/project",
+      clientTools: []
+    };
+    const model = {
+      id: "grok-4.7",
+      params: [
+        { id: "context", value: "500k" },
+        { id: "reasoning_effort", value: "high" },
+        { id: "fast", value: "false" }
+      ]
+    };
+    expect(localAgentCreateOptions(input).model).toEqual(model);
+    expect(localAgentSendOptions(input).model).toEqual(model);
+  });
+
   it("records accepted trajectory input and final output around one attached execution", async () => {
     const identity = `trajectory-${crypto.randomUUID()}`;
     const agent = finishedAgent(`agent-${identity}`, "trajectory final");

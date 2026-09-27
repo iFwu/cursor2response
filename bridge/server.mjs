@@ -6237,7 +6237,8 @@ function sdkModelSelection(model) {
         ? shorthand.toLowerCase()
         : entry.slice(separator + 1).trim().replace(/^(['"])(.*)\1$/, "$2");
       if (!paramId || !value) continue;
-      if (paramId === "reasoning_effort") paramId = "effort";
+      // Grok 4.7 registers reasoning_effort; older models use the effort alias.
+      if (paramId === "reasoning_effort" && id !== "grok-4.7") paramId = "effort";
       if (id === "auto-smart" && paramId === "mode") paramId = "optimize_for";
       const existing = params.findIndex((item) => item.id === paramId);
       const param = { id: paramId, value };

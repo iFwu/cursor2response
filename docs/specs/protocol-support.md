@@ -45,6 +45,22 @@ affinity. See [Responses Agent context affinity](responses-agent-context-affinit
 Conformance covers both response modes, tool-result continuation with phased
 history, stable message identity, and classification when trace recording fails.
 
+## Grok 4.7 model selection
+
+Grok 4.7 declares `reasoning_effort` in the Cursor model catalog. Responses
+`reasoning.effort` uses that parameter name through both Sidecar and Bridge;
+legacy models with `effort` retain their existing mapping. An explicit
+`service_tier: "default"` disables Fast when the catalog supports it.
+
+Client token budgets do not select a Cursor context mode. An explicit
+`cursor_context` or model `context` parameter selects that mode, subject to
+upstream admission. The catalog advertises 256k and 500k for Grok 4.7, but local
+SDK 1.0.31 and 1.0.32 rejected explicit 500k selections during validation on
+2026-09-27 while the same 256k selections completed. Do not claim 500k local
+support from catalog metadata alone or silently replace it with 256k. See
+[Cursor's model documentation](https://cursor.com/docs/models/grok-4-7) and the
+[local SDK limitation report](https://forum.cursor.com/t/grok-4-7-run-rejects-advertised-context-500k/172554).
+
 ## Change requirements
 
 - Responses changes must preserve the contracts in the other current specs unless the spec changes in the same patch.

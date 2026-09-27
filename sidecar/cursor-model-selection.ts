@@ -92,13 +92,14 @@ export function applyCursorModelSelection(
     : {};
   const bodyEffort = normalizeGrokEffort(extractRequestEffort(body));
   const grokFamily = isGrok46Family(modelId);
+  const effortParameter = supportedParameters?.has("reasoning_effort") ? "reasoning_effort" : "effort";
 
   const serviceTier = typeof record.service_tier === "string" ? record.service_tier.trim().toLowerCase() : "";
   const standardFast = typeof record.fast === "boolean"
     ? record.fast
     : serviceTier === "priority" || serviceTier === "fast"
       ? true
-      : undefined;
+      : serviceTier === "default" ? false : undefined;
 
   if (grokFamily) {
     if (!params.has("fast")) {
@@ -114,11 +115,11 @@ export function applyCursorModelSelection(
   } else if (
     bodyEffort.kind === "value"
     && bodyEffort.value
-    && supportedParameters?.has("effort")
+    && supportedParameters?.has(effortParameter)
     && !params.has("effort")
     && !params.has("reasoning_effort")
   ) {
-    params.set("effort", bodyEffort.value);
+    params.set(effortParameter, bodyEffort.value);
   }
 
   if (standardFast !== undefined && !params.has("fast") && (grokFamily || supportedParameters?.has("fast"))) {
@@ -161,7 +162,7 @@ export function applyCursorModelSelection(
   }
 
   for (const id of explicitParams) {
-    if (id === "reasoning_effort") {
+    if (id === "reasoning_effort" && effortParameter !== "reasoning_effort") {
       if (!params.has("effort")) params.set("effort", params.get(id) ?? "");
       params.delete(id);
     }

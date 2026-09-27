@@ -690,6 +690,51 @@ test("does not expose Responses state endpoints", async () => {
   }
 }, 15_000);
 
+test("honors Grok 4.7 catalog effort names and Fast settings through Responses", async () => {
+  const models: string[] = [];
+  const bridge = createServer(async (request, response) => {
+    if (request.url === "/models") {
+      request.resume();
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+        models: [{ id: "grok-4.7", displayName: "Grok 4.7", parameters:
+          ["reasoning_effort", "fast", "context"].map((id) => ({ id, values: [] })) }]
+      }));
+      return;
+    }
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    const selection = JSON.parse(body).model;
+    models.push(selection);
+    if (selection !== `grok-4.7[reasoning_effort=low,fast=${models.length === 2},context=256k]`) {
+      response.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({
+        error: { message: "Invalid registry parameters", code: "invalid_model" }
+      }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+      text: "Grok 4.7 parameters accepted", toolCalls: [], status: "finished"
+    }));
+  });
+  let runtime: Awaited<ReturnType<typeof startTestSidecar>> | undefined;
+  try {
+    runtime = await startTestSidecar(await listenOnRandomPort(bridge));
+    for (const service_tier of ["default", "fast"]) {
+      const response = await fetch(`http://${host}:${runtime.sidecarPort}/v1/responses`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "grok-4.7", input: "Hello", reasoning: { effort: "low" },
+          cursor_context: "256k", service_tier })
+      });
+      expect(response.status, Buffer.concat(runtime.childOutput).toString("utf8")).toBe(200);
+      expect(await response.text()).toContain("Grok 4.7 parameters accepted");
+    }
+    expect(models).toHaveLength(2);
+  } finally {
+    await stopChild(runtime?.sidecar);
+    await closeServer(bridge);
+  }
+}, 15_000);
+
 test("does not project provider reasoning into Responses output", async () => {
   const bridgeRequests: Array<Record<string, unknown>> = [];
   const bridge = createServer((request, response) => {

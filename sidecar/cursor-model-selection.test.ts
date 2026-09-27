@@ -85,4 +85,14 @@ describe("applyCursorModelSelection", () => {
       new Set(["effort"])
     ).id).toBe("claude-opus-5[effort=high]");
   });
+
+  test("preserves Grok 4.7 catalog parameter names and explicit context selection", () => {
+    const parameters = new Set(["reasoning_effort", "context", "fast"]);
+    expect(applyCursorModelSelection("grok-4.7", {
+      reasoning: { effort: "high" }, cursor_context: "500k", service_tier: "default"
+    }, parameters).id).toBe("grok-4.7[reasoning_effort=high,fast=false,context=500k]");
+    expect(applyCursorModelSelection("grok-4.7", {
+      cursor_params: { reasoning_effort: "low", context: "256k", fast: true }
+    }, parameters).id).toBe("grok-4.7[reasoning_effort=low,context=256k,fast=true]");
+  });
 });

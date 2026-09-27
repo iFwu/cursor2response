@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve Grok 4.7's `reasoning_effort` parameter through Sidecar and Bridge,
+  and honor `service_tier: "default"` by disabling Fast where supported. Local
+  SDK validation accepts 256k; advertised 500k mode remains unavailable.
 - Replace `grok-hybrid` and `grok-hybrid-fast` with `cursor-relay` (Cursor Relay). Both the
   Cursor primary and external Responses model are explicitly configured with
   `C2R_PRIMARY_MODEL`, `C2R_FALLBACK_BASE_URL`, `C2R_FALLBACK_API_KEY` and
