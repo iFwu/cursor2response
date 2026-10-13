@@ -31,17 +31,22 @@ the upstream protocol. Client context budgets must match the end-to-end route,
 rather than the primary SDK ceiling alone. Provider-specific reasoning, tools,
 images and request extensions must be compatible with both legs.
 
-Requests require full public history and the existing session-affinity resolver:
-header precedence and `prompt_cache_key` fallback are unchanged. Generated
-identities, `previous_response_id` and native SDK `system_prompt` overrides are
-rejected. SDK input checks still apply before routing; opaque provider state
-is not migrated.
+Requests require full public history and use the existing session-affinity
+resolver. Header precedence and `prompt_cache_key` fallback are unchanged.
+`previous_response_id` and native SDK `system_prompt` overrides are rejected.
+SDK input checks still apply before routing; opaque provider state is not migrated.
 
-When calling through an intermediate gateway, include a stable
+With an explicit session identity, fallback decisions remain sticky across
+requests. When calling through an intermediate gateway, include a stable
 `prompt_cache_key` in the request body; custom session headers may be filtered.
 Reuse that value for every turn of the conversation, including tool results.
-Missing identity returns `400 api_fallback_session_required` before either
-upstream runs. Do not generate a new cache key per turn to bypass this check.
+
+Without either identity, the resolver generates a fresh request-scoped ID.
+These standalone requests start on the SDK and may recover to fallback within
+that request under the same safety checks. They neither read nor write durable
+route markers. Later anonymous requests start on the SDK again, even if they
+include earlier history; clients needing sticky fallback must supply a stable
+identity rather than generating a new key for every turn.
 
 Route markers isolate resolved Cursor credential, logical model, configured
 primary model, fallback Responses URL/model, working directory and resolved
@@ -54,10 +59,10 @@ model must not discard an existing sticky fallback decision or retry the SDK.
 Only confirmed `cursor_sdk_context_compacted` arms fallback. Generic 413,
 authentication, timeout, rate-limit and model failures do not.
 
-Persist the marker before fallback, even when current recovery is unsafe. Later
-same-identity requests use fallback, including after an upstream failure or
-restart. There is no automatic switch back. New session identities start on
-SDK; a harness changing affinity on compaction also creates a new routing
+For explicit identities, persist the marker before fallback, even when current
+recovery is unsafe. Later same-identity requests use fallback, including after
+an upstream failure or restart. There is no automatic switch back. New session
+identities start on SDK; a harness changing affinity on compaction also creates a new routing
 identity. Do not strip suffixes or guess session families.
 
 Files contain version, route and time; names hash the routing identity.
@@ -154,6 +159,7 @@ identity, a short user-visible prompt prefix, and the Responses request id as `t
 The prefix comes from the latest visible user message in the complete request
 history, including on tool-result continuations with no newly added user input.
 Internal context, tool outputs and image payloads are excluded.
+Request-scoped fallback does not emit this durable-route notification.
 Notifications default to off. The executable receives `--title`, optional
 `--text`, `--level warn`, `--source cursor2response` and repeated `--field`
 arguments for session and trace ID. The title contains the configured primary

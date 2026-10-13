@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,9 @@ import { setTimeout as delay } from "node:timers/promises";
 const serverPath = fileURLToPath(new URL("../dist/runtime/sidecar/server.js", import.meta.url));
 
 test.each([
+  { stream: false, published: false, safe: true, model: "cursor-relay", recovered: false, generated: true, sdkSuccess: true },
+  { stream: false, published: false, safe: true, model: "cursor-relay", recovered: true, generated: true },
+  { stream: true, published: false, safe: true, model: "cursor-relay", recovered: true, generated: true },
   { stream: false, published: false, safe: true, model: "cursor-relay", recovered: true },
   { stream: false, published: false, safe: true, model: "cursor-auto", recovered: true },
   { stream: true, published: false, safe: true, model: "cursor-relay", recovered: true },
@@ -26,6 +29,7 @@ test.each([
   const directory = await mkdtemp(path.join(tmpdir(), "fallback-http-test-"));
   let sdkCalls = 0;
   const sdkModels: unknown[] = [];
+  const sdkSessions: unknown[] = [];
   const fallbackCalls: Array<{ body: Record<string, unknown>; authorization: string | null }> = [];
   const bridge = createServer(async (request, response) => {
     if (request.url === "/models") {
@@ -43,6 +47,12 @@ test.each([
     sdkCalls++;
     const body = await json(request) as Record<string, unknown>;
     sdkModels.push(body.model);
+    sdkSessions.push(body.sessionKey);
+    if (scenario.sdkSuccess) {
+      response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ text: "SDK result", toolCalls: [], status: "completed" }));
+      return;
+    }
     const error = { status: 413, code: "cursor_sdk_context_compacted", message: "SDK compacted", contextRetrySafe: scenario.safe };
     if (!body.streamEvents) {
       response.writeHead(413, { "content-type": "application/json" }).end(JSON.stringify({ error }));
@@ -103,7 +113,7 @@ test.each([
   };
   const request = (session: string, input: unknown = "continue", model = scenario.model) => fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST", headers: { authorization: "Bearer cursor-key", "content-type": "application/json",
-      ...(scenario.bodySession ? {} : { session_id: session }) },
+      ...(scenario.bodySession || scenario.generated ? {} : { session_id: session }) },
     body: JSON.stringify({ model, stream: scenario.stream, input,
       ...(scenario.bodySession ? { prompt_cache_key: session } : {}) })
   });
@@ -124,21 +134,26 @@ test.each([
     for (const removed of ["grok-hybrid", "grok-hybrid-fast", "api-fallback", "cursor-relay-fast", "cursor-auto-fast"]) {
       expect((await fetch(`http://127.0.0.1:${port}/v1/models/${removed}`, { headers })).status).toBe(404);
     }
-    if (scenario.bodySession) {
-      const missingSession = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
-        method: "POST", headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ model: "cursor-relay", input: "continue" })
-      });
-      expect(missingSession.status).toBe(400);
-      expect(await missingSession.json()).toMatchObject({ error: { code: "api_fallback_session_required" } });
-      expect(sdkCalls).toBe(0);
-      expect(fallbackCalls).toHaveLength(0);
-    }
     const first = await request("session-one");
     const firstBody = await first.text();
     expect(firstBody.includes("MP result")).toBe(scenario.recovered);
-    expect(firstBody.includes("context_length_exceeded")).toBe(!scenario.recovered);
+    expect(firstBody.includes("context_length_exceeded")).toBe(!scenario.recovered && !scenario.sdkSuccess);
     expect(sdkCalls).toBe(1);
+    if (scenario.generated) {
+      expect(first.status).toBe(200);
+      const expectedText = scenario.sdkSuccess ? "SDK result" : "MP result";
+      expect(firstBody).toContain(expectedText);
+      expect(await (await request("ignored")).text()).toContain(expectedText);
+      expect(await readdir(path.join(directory, "routes")).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      })).toEqual([]);
+      expect(sdkCalls).toBe(2);
+      expect(fallbackCalls).toHaveLength(scenario.recovered ? 2 : 0);
+      expect(sdkSessions[0]).toEqual(expect.any(String));
+      expect(sdkSessions[1]).not.toBe(sdkSessions[0]);
+      return;
+    }
     if (["cursor-relay", "cursor-auto"].includes(scenario.model)) {
       expect(sdkModels[0]).toBe(scenario.primary ? "grok-4.6[fast=true,effort=high]" : "cursor-primary");
     }

@@ -179,7 +179,7 @@ export function notifyApiFallback(command: string | undefined, notice: FallbackN
 
 export class ApiFallbackRoute {
   private readonly key: string;
-  private readonly store: FallbackRouteStore;
+  private readonly store?: FallbackRouteStore;
   private attemptIndex = 0;
 
   constructor(
@@ -188,9 +188,6 @@ export class ApiFallbackRoute {
     private readonly trace: FallbackTrace,
     private readonly fetchUpstream: Deps["fetch"] = fetch
   ) {
-    if (request.session.source === "generated") {
-      throw new HttpError("api-fallback requires a session header or prompt_cache_key.", 400, "api_fallback_session_required");
-    }
     if (request.body.previous_response_id) {
       throw new HttpError("api-fallback requires complete input history, not previous_response_id.", 400, "unsupported_parameter", "previous_response_id");
     }
@@ -201,7 +198,8 @@ export class ApiFallbackRoute {
       .update(JSON.stringify([request.apiKey, API_FALLBACK_STATE_NAMESPACE, config.primaryModel,
         config.responsesUrl, config.model, request.workingDirectory ?? "", request.session.key]))
       .digest("hex");
-    this.store = new FallbackRouteStore(config.stateDirectory);
+    // Generated identities belong to one request, never to durable sticky routing.
+    if (request.session.source !== "generated") this.store = new FallbackRouteStore(config.stateDirectory);
   }
 
   private record(fields: Record<string, unknown>): void {
@@ -222,14 +220,14 @@ export class ApiFallbackRoute {
 
   async initialResponse(): Promise<Response | undefined> {
     this.request.signal.throwIfAborted();
-    if (await this.store.hasFallback(this.key)) return this.forward("sticky_fallback", true);
+    if (await this.store?.hasFallback(this.key)) return this.forward("sticky_fallback", true);
     this.record({ route: "cursor_sdk", routeCause: "primary_first", routeStickyHit: false, attemptIndex: 0 });
     return undefined;
   }
 
   async recover(error: unknown, outputPublished: boolean): Promise<Response | undefined> {
     if (!(error instanceof CursorSdkContextOverflowError)) return undefined;
-    await this.store.useFallback(this.key, this.request.session.key, this.request.requestId);
+    await this.store?.useFallback(this.key, this.request.session.key, this.request.requestId);
     const retrySafe = !outputPublished && error.contextRetrySafe && !this.request.signal.aborted;
     this.record({
       route: "fallback", routeCause: "sdk_context_overflow", outputPublished,
@@ -238,7 +236,7 @@ export class ApiFallbackRoute {
         : this.request.signal.aborted ? "caller_cancelled" : "cleanup_unconfirmed",
       routeStickyHit: false
     });
-    notifyApiFallback(this.config.notifyCommand, {
+    if (this.store) notifyApiFallback(this.config.notifyCommand, {
       primaryModel: this.config.primaryModel,
       fallbackModel: this.config.model,
       sessionKey: this.request.session.key,

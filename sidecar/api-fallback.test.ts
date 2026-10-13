@@ -191,9 +191,34 @@ test.each([
   }
 });
 
-test("rejects missing session identity and provider-owned continuation state", async () => {
+test("keeps generated identities request-scoped without reading or writing sticky markers", async () => {
+  await fixture(async ({ route, request, config, calls }) => {
+    // A matching durable marker must not turn an anonymous request into a continuation.
+    await writeFile(path.join(config.stateDirectory, LEGACY_ROUTE_FILENAME), "invalid state");
+    const session = { ...request.session, source: "generated" as const, sessionHeaders: [] };
+    const first = route({ session });
+    expect(await first.initialResponse()).toBeUndefined();
+    expect((await first.recover(new CursorSdkContextOverflowError("SDK compacted", true), false))?.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(await route({ session }).initialResponse()).toBeUndefined();
+    expect(await readdir(config.stateDirectory)).toEqual([LEGACY_ROUTE_FILENAME]);
+    expect(await readFile(path.join(config.stateDirectory, LEGACY_ROUTE_FILENAME), "utf8")).toBe("invalid state");
+  });
+});
+
+test.each(["published", "unsafe", "cancelled"])("does not recover or persist an anonymous %s request", async (state) => {
+  await fixture(async ({ route, request, config, calls }) => {
+    const controller = new AbortController();
+    const first = route({ session: { ...request.session, source: "generated", sessionHeaders: [] }, signal: controller.signal });
+    if (state === "cancelled") controller.abort();
+    expect(await first.recover(new CursorSdkContextOverflowError("SDK compacted", state !== "unsafe"), state === "published")).toBeUndefined();
+    expect(calls).toHaveLength(0);
+    expect(await readdir(config.stateDirectory)).toEqual([]);
+  });
+});
+
+test("rejects provider-owned continuation state", async () => {
   await fixture(async ({ route, request }) => {
-    expect(() => route({ session: { ...request.session, source: "generated" } })).toThrow("session");
     expect(() => route({ body: { ...request.body, previous_response_id: "resp-old" } })).toThrow("complete input");
     expect(() => route({ body: { ...request.body, system_prompt: "SDK-only instruction" } })).toThrow("system_prompt");
   });
